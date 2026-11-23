@@ -17,10 +17,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 //
-// Contributors: Xiao Cheng, Jiawei Wang
+// Contributors: Jiawei Yang
 //
 //===----------------------------------------------------------------------===//
 
+#include <cassert>
 #include <cstdlib>
 #include "AE/Svfexe/SVFIRAdapter.h"
 
@@ -32,7 +33,6 @@
 
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -42,6 +42,102 @@ namespace SVF
 using SVF::Location;
 using SVF::MemoryLayout;
 using SVF::Variable;
+
+bool SVFIRAdapter::loadedMemoryStillCurrent(const LoadStmt* load, const ICFGNode* node)
+{
+    const ICFGNode* origin = load->getICFGNode();
+    if (!origin->getBB() || origin->getBB() != node->getBB()) return false;
+    std::set<const ICFGNode*> seen;
+    for (const ICFGNode* cursor = node;;)
+    {
+        if (!seen.insert(cursor).second || !SVFUtil::isa<IntraICFGNode>(cursor) ||
+                cursor->getBB() != origin->getBB()) return false;
+        for (const SVFStmt* stmt : cursor->getSVFStmts())
+            if (SVFUtil::isa<StoreStmt>(stmt)) return false;
+        if (cursor == origin) return true;
+        if (cursor->getInEdges().size() != 1) return false;
+        const auto* edge = SVFUtil::dyn_cast<IntraCFGEdge>(*cursor->getInEdges().begin());
+        if (!edge || edge->getCondition()) return false;
+        cursor = edge->getSrcNode();
+    }
+}
+
+const SVFVar* SVFIRAdapter::booleanCondition(const SVFVar* value, bool& taken)
+{
+    const auto booleanValue = [](const SVFVar* input)
+    {
+        std::set<const SVFVar*> visited;
+        while (input && visited.insert(input).second)
+        {
+            const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(input->getType());
+            if (type && type->isBoolean())
+                return true;
+            const auto* v = SVFUtil::dyn_cast<ValVar>(input);
+            const auto* copy = v && v->getInEdges().size() == 1
+                               ? SVFUtil::dyn_cast<CopyStmt>(*v->getInEdges().begin()) : nullptr;
+            if (!copy || (copy->getCopyKind() != CopyStmt::ZEXT &&
+                          copy->getCopyKind() != CopyStmt::SEXT &&
+                          copy->getCopyKind() != CopyStmt::COPYVAL))
+                break;
+            input = copy->getRHSVar();
+        }
+        return false;
+    };
+    std::set<const SVFVar*> seen;
+    while (value && seen.insert(value).second)
+    {
+        const auto* variable = SVFUtil::dyn_cast<ValVar>(value);
+        if (!variable || variable->getInEdges().size() != 1)
+            break;
+        const SVFStmt* def = *variable->getInEdges().begin();
+        if (const auto* copy = SVFUtil::dyn_cast<CopyStmt>(def))
+        {
+            if (booleanValue(copy->getRHSVar()) &&
+                    (copy->getCopyKind() == CopyStmt::ZEXT ||
+                     copy->getCopyKind() == CopyStmt::SEXT ||
+                     copy->getCopyKind() == CopyStmt::COPYVAL))
+            {
+                value = copy->getRHSVar();
+                continue;
+            }
+        }
+        if (const auto* binary = SVFUtil::dyn_cast<BinaryOPStmt>(def))
+        {
+            const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(value->getType());
+            if (type && type->isBoolean() && binary->getOpcode() == BinaryOPStmt::Xor)
+            {
+                for (unsigned i = 0; i < 2; ++i)
+                    if (const auto* c = SVFUtil::dyn_cast<ConstIntValVar>(binary->getOpVar(i)))
+                    {
+                        taken = taken != (c->getSExtValue() != 0);
+                        value = binary->getOpVar(1 - i);
+                        break;
+                    }
+                if (value != variable)
+                    continue;
+            }
+        }
+        if (const auto* cmp = SVFUtil::dyn_cast<CmpStmt>(def))
+        {
+            if (cmp->getPredicate() == CmpStmt::ICMP_EQ ||
+                    cmp->getPredicate() == CmpStmt::ICMP_NE)
+            {
+                for (unsigned i = 0; i < 2; ++i)
+                    if (const auto* c = SVFUtil::dyn_cast<ConstIntValVar>(cmp->getOpVar(i)))
+                        if (c->getSExtValue() == 0 && booleanValue(cmp->getOpVar(1 - i)))
+                        {
+                            value = cmp->getOpVar(1 - i);
+                            taken = taken != (cmp->getPredicate() == CmpStmt::ICMP_EQ);
+                            break;
+                        }
+                if (value != variable)
+                    continue;
+            }
+        }
+        break;
+    }
+    return value;
+}
 
 namespace
 {
@@ -110,14 +206,20 @@ Variable nextVariable(std::uint64_t& next,
                       SVF::NumericType type)
 {
     if (next > std::numeric_limits<std::uint32_t>::max())
-        throw std::overflow_error("too many abstract-domain variables");
+    {
+        assert(false && "too many abstract-domain variables");
+        std::abort();
+    }
     return Variable(static_cast<std::uint32_t>(next++), type);
 }
 
 Location nextLocation(std::uint64_t& next)
 {
     if (next > std::numeric_limits<std::uint32_t>::max())
-        throw std::overflow_error("too many abstract-domain locations");
+    {
+        assert(false && "too many abstract-domain locations");
+        std::abort();
+    }
     return Location(static_cast<std::uint32_t>(next++));
 }
 
@@ -181,7 +283,10 @@ SVFIRAdapter::SVFIRAdapter(const SVFIR& svfir)
     addScalars(false);
     addScalars(true);
     if (nextVariableId_ > std::numeric_limits<std::uint32_t>::max())
-        throw std::overflow_error("too many abstract-domain scalar variables");
+    {
+        assert(false && "too many abstract-domain scalar variables");
+        std::abort();
+    }
     firstObjectContentVariableId_ =
         static_cast<std::uint32_t>(nextVariableId_);
     addObjectContents(false);
@@ -224,6 +329,7 @@ void SVFIRAdapter::registerObject(const ObjVar& object) const
     contentObjectsByVariableId_.resize(content.id() + 1);
     contentObjectsByVariableId_[content.id()] = &object;
     memoryLayout_.extend(location, content);
+    if (objectRegistration_) objectRegistration_(object, content);
 }
 
 bool SVFIRAdapter::contains(const ValVar& value) const
@@ -240,7 +346,10 @@ Variable SVFIRAdapter::variable(const ValVar& value) const
 {
     const auto iterator = variables_.find(&value);
     if (iterator == variables_.end())
-        throw std::invalid_argument("ValVar is not tracked by this adapter");
+    {
+        assert(false && "ValVar is not tracked by this adapter");
+        std::abort();
+    }
     return iterator->second;
 }
 
@@ -253,16 +362,20 @@ const ValVar* SVFIRAdapter::value(Variable variable) const
 
 Location SVFIRAdapter::location(const ObjVar& object) const
 {
-    registerObject(object);
     const auto iterator = locations_.find(&object);
-    return iterator->second;
+    if (iterator != locations_.end())
+        return iterator->second;
+    registerObject(object);
+    return locations_.find(&object)->second;
 }
 
 Variable SVFIRAdapter::contentVariable(const ObjVar& object) const
 {
-    registerObject(object);
     const auto iterator = contentVariables_.find(&object);
-    return iterator->second;
+    if (iterator != contentVariables_.end())
+        return iterator->second;
+    registerObject(object);
+    return contentVariables_.find(&object)->second;
 }
 
 const ObjVar* SVFIRAdapter::contentObject(Variable variable) const
@@ -314,14 +427,18 @@ bool SVFIRAdapter::isPointer(Variable variable) const
         return scalar->isPointer();
     if (const ObjVar* object = contentObject(variable))
         return object->isPointer();
-    throw std::invalid_argument("Variable is not tracked by this adapter");
+    assert(false && "Variable is not tracked by this adapter");
+    std::abort();
 }
 
 const ObjVar& SVFIRAdapter::object(Location location) const
 {
     const auto iterator = objects_.find(location);
     if (iterator == objects_.end())
-        throw std::invalid_argument("location is not tracked by this adapter");
+    {
+        assert(false && "location is not tracked by this adapter");
+        std::abort();
+    }
     return *iterator->second;
 }
 

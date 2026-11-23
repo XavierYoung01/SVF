@@ -22,9 +22,14 @@
 #define SVF_AE_STATEMENT_RELATION_PACKING_H
 
 #include "AE/Core/RelationPacking.h"
+#include <set>
+#include <string>
 
 namespace SVF
 {
+class ICFGNode;
+class SVFStmt;
+class SVFVar;
 class SVFIR;
 class SVFIRAdapter;
 class PointerAnalysis;
@@ -41,6 +46,24 @@ struct StatementPackingResult
 {
     SVF::RelationPacking packs;
     std::vector<StatementPackingEdge> edges;
+    std::vector<SVF::Variable> queries;
+};
+
+struct StatementPackingQuery
+{
+    std::string identity;
+    const ICFGNode* node;
+    const SVFStmt* statement;
+    const SVFVar* operand;
+    std::string kind;
+};
+
+struct StatementPackingDemand
+{
+    std::set<std::size_t> packs;
+    std::set<const ICFGNode*> points;
+    std::set<const SVFStmt*> transfers;
+    std::set<const SVFVar*> values;
 };
 
 /// Bind the program context once, then pack any permitted numerical vocabulary.
@@ -54,7 +77,15 @@ public:
                              const AllocationSizeModel* sizes = nullptr)
         : ir_(ir), adapter_(adapter), pointsTo_(pointsTo), sizes_(sizes) {}
     StatementPackingResult pack(
-        const std::vector<SVF::Variable>& vocabulary) const;
+        const std::vector<SVF::Variable>& vocabulary,
+        bool differencesOnly = false, bool queryComponents = false) const;
+    RelationPacking packDuet(const std::vector<Variable>& vocabulary) const;
+    RelationPacking packSpe(const std::vector<Variable>& vocabulary,
+        const std::vector<const ICFGNode*>& entries,
+        const std::vector<StatementPackingQuery>& queries) const;
+    StatementPackingDemand selectDemand(
+        const SVF::RelationPacking& full,
+        const std::vector<StatementPackingQuery>& queries) const;
 private:
     SVFIR& ir_;
     const SVFIRAdapter& adapter_;

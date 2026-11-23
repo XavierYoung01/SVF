@@ -358,6 +358,12 @@ void AbstractInterpretation::restorePostReplayCallerFrame(
 
 void AbstractInterpretation::verifyPostFixpoint()
 {
+    if (const char* skip = std::getenv("SVF_AE_SKIP_POST_CHECK"))
+        if (std::string(skip) == "1")
+        {
+            std::cerr << "AE_POST_CHECK disabled-by-user\n";
+            return;
+        }
     if (!postCheckEnabled())
         return;
     if (Options::AEQueryInputID().empty())
@@ -504,7 +510,7 @@ void AbstractInterpretation::verifyPostFixpoint()
             "AE Post check currently requires exactly one analysis entry");
     }
 
-    const Map<const ICFGNode*, State> storedStates = stateTrace_;
+    const Map<const ICFGNode*, State> storedStates = abstractTrace_;
     Map<const ICFGNode*, const CallICFGNode*> summaryReturns;
     for (const auto& [node, stored] : storedStates)
     {
@@ -549,10 +555,12 @@ void AbstractInterpretation::verifyPostFixpoint()
         finalStates.emplace(node,
                             reconstructPostState(node, availability.at(node)));
     }
-    if (const char* recheck = std::getenv("SVF_AE_QUERY_RECHECK"))
+    if (strictQueryCoverage())
+        recheckQueriesOnFinalStates(finalStates, queryLedgerPath() + ".recheck.tsv");
+    else if (const char* recheck = std::getenv("SVF_AE_QUERY_RECHECK"))
         recheckQueriesOnFinalStates(
             finalStates, std::string(recheck) == "auto"
-            ? Options::AEQueryLedgerFile() + ".recheck.tsv"
+            ? queryLedgerPath() + ".recheck.tsv"
             : std::string(recheck));
 
     // Replay through a separate dense interpreter. This prevents virtual
@@ -571,8 +579,8 @@ void AbstractInterpretation::verifyPostFixpoint()
     const auto replayNode = [&](const ICFGNode* node,
                                 const State& incoming) -> State
     {
-        replay.stateTrace_ = finalStates;
-        replay.stateTrace_.insert_or_assign(node, incoming);
+        replay.abstractTrace_ = finalStates;
+        replay.abstractTrace_.insert_or_assign(node, incoming);
         for (const SVFStmt* statement : node->getSVFStmts())
         {
             if (SVFUtil::isa<RetICFGNode>(node) &&
@@ -630,8 +638,8 @@ void AbstractInterpretation::verifyPostFixpoint()
     }
     else
     {
-        replay.stateTrace_ = finalStates;
-        replay.stateTrace_.insert_or_assign(global, replay.topState());
+        replay.abstractTrace_ = finalStates;
+        replay.abstractTrace_.insert_or_assign(global, replay.topState());
         for (const SVFStmt* statement : global->getSVFStmts())
             replay.handleSVFStatement(statement);
         if (const auto* blackHole = SVFUtil::dyn_cast<ValVar>(
@@ -641,9 +649,7 @@ void AbstractInterpretation::verifyPostFixpoint()
         const FunObjVar* root = roots.front();
         const FunEntryICFGNode* rootEntry =
             replay.icfg->getFunEntryICFGNode(root);
-        for (const SVFVar* argument : rootEntry->getFormalParms())
-            replay.updateInterval(argument, replay.unknownInterval(argument),
-                                  global);
+        replay.initializeRootArguments(rootEntry, global);
         State replayedGlobal = replay.state(global);
         normalizePostReplayState(replayedGlobal, availability.at(global));
         const bool included = replayedGlobal.isSubsetOf(globalFinal->second) ==
@@ -683,7 +689,7 @@ void AbstractInterpretation::verifyPostFixpoint()
     for (const auto& [returnSite, call] : summaryReturns)
     {
         semanticDiscriminator = "recursive-summary";
-        replay.stateTrace_ = finalStates;
+        replay.abstractTrace_ = finalStates;
         replay.skipRecursionWithTop(call);
         State summarized = replay.state(returnSite);
         normalizePostReplayState(summarized, availability.at(returnSite));
@@ -771,7 +777,8 @@ void AbstractInterpretation::verifyPostFixpoint()
         // states. Semi-sparse finalStates are reconstructed with scalar
         // summaries that are absent from the propagated flow carrier; their
         // virtual caller-frame hook below already mirrors the sparse merge.
-        if (Options::AESparsity() == AESparsity::Dense)
+        if (Options::AESparsity() == AESparsity::Dense ||
+                usesPackSSA())
             replay.applyRelationalCallBoundary(incoming, edge, target);
         const auto targetAvailability = availability.find(target);
         if (targetAvailability != availability.end())

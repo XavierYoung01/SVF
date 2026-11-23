@@ -21,15 +21,15 @@
 #pragma once
 #include "AE/Svfexe/AbstractInterpretation.h"
 #include "AE/Core/PackedRelationalDomain.h"
+#include "AE/Svfexe/PackSSA.h"
 #include <map>
 #include <set>
 
 namespace SVF
 {
-/// Static pack-location Def/Use propagation. Numeric identity components are
-/// routed to reaching pack definitions; Box, addresses and guards flow densely.
-/// The shared WTO driver fixes scheduling/widening. This is independent of the
-/// ValVar def-site reconstruction in SemiSparseAbstractInterpretation.
+/// Function-local pack SSA with explicit call interfaces. The shared ICFG/WTO
+/// driver supplies feasible edge values and keeps control flow separate from
+/// reaching pack definitions. Auxiliary facets follow the shared interpreter.
 class OhPackedAbstractInterpretation final : public AbstractInterpretation
 {
 public:
@@ -38,6 +38,7 @@ public:
 protected:
     void initializeExecutionPolicy() override;
     void beginAbstractState(const ICFGNode*) override;
+    void recordIncomingAbstractState(const ICFGEdge*, const State&) override;
     void finalizeAbstractState(const ICFGNode*) override;
     State& ensureState(const ICFGNode*) override;
     const State& state(const ICFGNode*) const override;
@@ -52,9 +53,9 @@ protected:
 private:
     using Pack = SVF::OctagonDomain;
     using Defs = std::set<std::size_t>;
-    std::map<const ICFGNode*, Defs> definitions_;
-    std::map<const ICFGNode*, std::map<std::size_t,const ICFGNode*>> routes_;
-    std::map<const ICFGNode*, std::map<std::size_t, Pack>> storedPacks_;
+    std::unique_ptr<PackSSA> packSSA_;
+    std::map<PackSSA::VersionID, Pack> storedPacks_;
+    std::set<PackSSA::VersionID> retainedVersions_;
     mutable std::map<const ICFGNode*, std::unique_ptr<State>> readCache_;
     // Preserve references returned before a mutable borrow until the next
     // node/merge boundary; new reads must reconstruct from current definitions.
@@ -62,10 +63,11 @@ private:
     mutable std::size_t peakReadCacheNodes_ = 0;
     std::map<const ICFGNode*, unsigned> active_;
     std::set<const ICFGNode*> expanded_;
-    std::size_t restored_ = 0, omittedChecks_ = 0;
+    std::size_t restored_ = 0, omittedChecks_ = 0, edgeChecks_ = 0;
     double graphSeconds_ = 0;
     State reconstruct(const ICFGNode*) const;
-    const Pack& definition(const ICFGNode*, std::size_t) const;
+    const Pack& definition(PackSSA::VersionID) const;
+    void saveDefinitions(const PackSSA::Routes&, const State&);
     void compact(const ICFGNode*);
     void compactBorrowed();
     void invalidateReadCache();

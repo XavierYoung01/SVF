@@ -26,10 +26,10 @@
 
 #include "AE/Core/AbstractDomain.h"
 #include "AE/Core/AddressDomain.h"
-#include "AE/Core/Expression.h"
-#include "AE/Core/InitializationDomain.h"
 #include "AE/Core/NumericalDomain.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -41,6 +41,86 @@
 
 namespace SVF
 {
+
+/// The powerset of {uninitialized, initialized}. This describes initialization
+/// only: Initialized does not imply a precise numerical or pointer value.
+enum class InitializationState : unsigned char
+{
+    Bottom = 0,
+    Uninitialized = 1,
+    Initialized = 2,
+    Top = 3
+};
+
+/// Independent, total initialization property. Omitted variables have the
+/// explicit defaultState(), not a storage-dependent interpretation. A uniform
+/// default permits both sparse unknown states and sparse fresh-frame states.
+/// This domain does not decide how an interpreter handles an uninitialized read.
+class InitializationDomain final : public AbstractDomain
+{
+    friend class BoxAddressDomain;
+
+public:
+    static InitializationDomain top();
+    static InitializationDomain bottom();
+    static InitializationDomain uniform(InitializationState state);
+
+    DomainKind kind() const noexcept override
+    {
+        return DomainKind::Initialization;
+    }
+    std::unique_ptr<AbstractDomain> clone() const override;
+
+    InitializationState value(Variable variable) const;
+    InitializationState defaultState() const;
+    void assign(Variable variable, InitializationState state);
+    void forget(Variable variable);
+    std::vector<Variable> nonDefaultVariables() const;
+    std::vector<Variable> nonDefaultVariablesBefore(Variable upperBound) const;
+
+private:
+    static constexpr unsigned ValuesPerPage = 64;
+
+    /// Two bit planes encode non-default states. A zero pair is an omitted
+    /// slot, not coordinate Bottom (which collapses the entire domain).
+    struct Page
+    {
+        std::uint64_t uninitialized = 0;
+        std::uint64_t initialized = 0;
+    };
+    struct PageEntry
+    {
+        // The ID is a page number. Type remains part of variable identity.
+        Variable key;
+        std::shared_ptr<Page> page;
+    };
+    using Directory = std::vector<PageEntry>;
+    explicit InitializationDomain(InitializationState state);
+    static std::shared_ptr<Directory> emptyPages();
+    static Page expanded(const Page* page, InitializationState defaultState);
+    static Page exceptions(Page values, InitializationState defaultState);
+    std::vector<Variable> nonDefaultVariables(const Variable* upperBound) const;
+    const void* dynamicTypeToken() const noexcept override
+    {
+        return staticTypeToken<InitializationDomain>();
+    }
+    bool hasCompatibleDomain(const AbstractDomain& other) const override;
+    void joinDomain(const AbstractDomain& other) override;
+    void meetDomain(const AbstractDomain& other) override;
+    void widenDomain(const AbstractDomain& next) override;
+    void narrowDomain(const AbstractDomain& next) override;
+    bool isBottomDomain() const override;
+    bool isTopDomain() const override;
+    bool leqDomain(const AbstractDomain& other) const override;
+    std::string domainToString() const override;
+    void combine(const InitializationDomain& other, bool join);
+
+    InitializationState default_;
+    // Copies share the directory and pages. A first write detaches the small
+    // directory; only the modified page's bits are copied, not all facts.
+    std::shared_ptr<Directory> pages_;
+};
+
 
 class LifetimeDomain final : public AbstractDomain
 {
@@ -184,7 +264,10 @@ public:
     void replaceNumericalStorage(std::unique_ptr<NumericalDomain> numerical)
     {
         if (!numerical)
-            throw std::invalid_argument("null numerical storage");
+        {
+            assert(false && "null numerical storage");
+            std::abort();
+        }
         numerical_ = std::move(numerical);
     }
     AddressDomain& addresses()
@@ -226,6 +309,9 @@ public:
     Interval interval(Variable variable) const;
     AddressSet addressSet(Variable variable) const;
     bool hasValue(Variable variable) const;
+    bool hasSameValue(Variable variable, const BoxAddressDomain& other) const;
+    /// Compare visible values, excluding lifetime and initialization alternatives.
+    bool hasSameValues(const BoxAddressDomain& other) const;
     void setInterval(Variable variable, const Interval& value);
     void setAddressSet(Variable variable, const AddressSet& value);
     /// Copy or join one reduced-product coordinate without copying a state.
@@ -394,6 +480,7 @@ public:
     }
 
 private:
+    const Interval& boxInterval(Variable variable) const;
     const void* dynamicTypeToken() const noexcept override
     {
         return staticTypeToken<BoxAddressDomain>();

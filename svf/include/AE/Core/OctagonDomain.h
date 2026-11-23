@@ -24,8 +24,6 @@
 #ifndef SVF_AE_OCTAGON_DOMAIN_H
 #define SVF_AE_OCTAGON_DOMAIN_H
 
-#include "AE/Core/DimensionLayout.h"
-#include "AE/Core/Expression.h"
 #include "AE/Core/NumericalDomain.h"
 
 #include <memory>
@@ -33,19 +31,6 @@
 
 namespace SVF
 {
-/// Selects the physical carrier of an Octagon DBM.  This is deliberately not
-/// part of the abstract semantics: states using different carriers may be
-/// combined, compared, and converted without approximation.
-enum class OctagonStorageKind
-{
-    DenseHalf,
-    SparseFinite,
-    ComponentDense
-};
-
-const char* octagonStorageKindName(OctagonStorageKind kind);
-OctagonStorageKind octagonStorageKindFromName(const std::string& name);
-
 struct OctagonStorageStats
 {
     OctagonStorageKind kind = OctagonStorageKind::DenseHalf;
@@ -54,28 +39,6 @@ struct OctagonStorageStats
     std::size_t allocatedBoundSlots = 0;
     std::size_t components = 0;
     std::size_t maximumComponent = 0;
-};
-
-struct OctagonConfig
-{
-    bool strongClosure = true;
-    bool integerTightening = true;
-    OctagonStorageKind storage = OctagonStorageKind::DenseHalf;
-    /// ComponentDense only: share component matrices across abstract-state
-    /// copies until the first write. Disabling this keeps identical abstract
-    /// semantics but moves the matrix-copy cost from mutation to clone.
-    bool componentCopyOnWrite = true;
-    /// Use the quadratic single-variable closure repair where its precondition
-    /// holds. Disabling it computes the same canonical state with full closure.
-    bool incrementalClosure = true;
-    std::shared_ptr<DiagnosticSink> diagnostics;
-
-    /// Diagnostics affect observation only, not abstract-state semantics.
-    bool operationCompatible(const OctagonConfig& other) const
-    {
-        return strongClosure == other.strongClosure &&
-               integerTightening == other.integerTightening;
-    }
 };
 
 /// One Octagon abstract element for constraints +/-x +/-y <= c.

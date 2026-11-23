@@ -24,10 +24,12 @@
 #include "AE/Core/NumericalDomain.h"
 #include "AE/Core/OctagonDomain.h"
 #include "AE/Core/ConvexPolyhedraDomain.h"
-#include "AE/Core/Expression.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,7 +38,6 @@
 #include <optional>
 #include <set>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -139,10 +140,20 @@ Integer::Integer() : value_(0) {}
 Integer::Integer(std::int64_t value)
 {
     if (mpz_set_str(value_.get_mpz_t(), std::to_string(value).c_str(), 10) != 0)
-        throw std::invalid_argument("invalid 64-bit integer");
+    {
+        assert(false && "invalid 64-bit integer");
+        std::abort();
+    }
 }
 
-Integer::Integer(const std::string& value) : value_(value) {}
+Integer::Integer(const std::string& value)
+{
+    if (mpz_set_str(value_.get_mpz_t(), value.c_str(), 0) != 0)
+    {
+        assert(false && "invalid integer string");
+        std::abort();
+    }
+}
 
 std::string Integer::toString() const
 {
@@ -156,21 +167,33 @@ Rational::Rational(std::int64_t value)
     mpz_class integer;
     if (mpz_set_str(integer.get_mpz_t(), std::to_string(value).c_str(), 10) !=
             0)
-        throw std::invalid_argument("invalid 64-bit rational integer");
+    {
+        assert(false && "invalid 64-bit rational integer");
+        std::abort();
+    }
     mpq_set_z(value_.get_mpq_t(), integer.get_mpz_t());
 }
 
 Rational::Rational(const Integer& value) : value_(value.value()) {}
 
-Rational::Rational(const std::string& value) : value_(value)
+Rational::Rational(const std::string& value)
 {
+    if (mpq_set_str(value_.get_mpq_t(), value.c_str(), 0) != 0 ||
+            mpz_sgn(mpq_denref(value_.get_mpq_t())) == 0)
+    {
+        assert(false && "invalid rational string");
+        std::abort();
+    }
     value_.canonicalize();
 }
 
 Rational::Rational(const Integer& numerator, const Integer& denominator)
 {
     if (denominator.value() == 0)
-        throw std::invalid_argument("a rational denominator cannot be zero");
+    {
+        assert(false && "a rational denominator cannot be zero");
+        std::abort();
+    }
     mpq_set_num(value_.get_mpq_t(), numerator.value().get_mpz_t());
     mpq_set_den(value_.get_mpq_t(), denominator.value().get_mpz_t());
     value_.canonicalize();
@@ -189,8 +212,10 @@ Rational Rational::fromRaw(const mpq_class& value)
 Rational Rational::fromDouble(double value)
 {
     if (!std::isfinite(value))
-        throw std::invalid_argument(
-            "a non-finite floating value is not rational");
+    {
+        assert(false && "a non-finite floating value is not rational");
+        std::abort();
+    }
     mpq_class rational;
     mpq_set_d(rational.get_mpq_t(), value);
     rational.canonicalize();
@@ -207,24 +232,31 @@ bool Rational::isInteger() const
     return mpz_cmp_ui(mpq_denref(value_.get_mpq_t()), 1U) == 0;
 }
 
-std::int64_t Rational::toInt64() const
+bool Rational::tryToInt64(std::int64_t& result) const
 {
     if (!isInteger())
-        throw std::domain_error("rational is not an integer");
+        return false;
     const std::string encoded =
         mpz_class(mpq_numref(value_.get_mpq_t())).get_str();
-    std::size_t consumed = 0;
-    try
+    std::int64_t parsed = 0;
+    const auto conversion = std::from_chars(
+                                encoded.data(), encoded.data() + encoded.size(), parsed);
+    if (conversion.ec != std::errc() ||
+            conversion.ptr != encoded.data() + encoded.size())
+        return false;
+    result = parsed;
+    return true;
+}
+
+std::int64_t Rational::toInt64() const
+{
+    std::int64_t result = 0;
+    if (!tryToInt64(result))
     {
-        const long long result = std::stoll(encoded, &consumed, 10);
-        if (consumed != encoded.size())
-            throw std::out_of_range("invalid integer encoding");
-        return static_cast<std::int64_t>(result);
+        assert(false && "rational is not an int64 integer");
+        std::abort();
     }
-    catch (const std::exception&)
-    {
-        throw std::overflow_error("rational integer does not fit int64");
-    }
+    return result;
 }
 
 double Rational::toDouble() const
@@ -288,7 +320,10 @@ Rational& Rational::operator*=(const Rational& rhs)
 Rational& Rational::operator/=(const Rational& rhs)
 {
     if (rhs.isZero())
-        throw std::domain_error("division by zero rational");
+    {
+        assert(false && "division by zero rational");
+        std::abort();
+    }
     value_ /= rhs.value_;
     return *this;
 }
@@ -319,7 +354,10 @@ Bound Bound::plusInfinity()
 const Rational& Bound::value() const
 {
     if (!isFinite())
-        throw std::logic_error("an infinite bound has no finite value");
+    {
+        assert(false && "an infinite bound has no finite value");
+        std::abort();
+    }
     return value_;
 }
 
@@ -353,7 +391,10 @@ Bound Bound::add(const Bound& lhs, const Bound& rhs)
 {
     if ((lhs.isMinusInfinity() && rhs.isPlusInfinity()) ||
             (lhs.isPlusInfinity() && rhs.isMinusInfinity()))
-        throw std::domain_error("indeterminate sum of opposite infinities");
+    {
+        assert(false && "indeterminate sum of opposite infinities");
+        std::abort();
+    }
     if (lhs.isMinusInfinity() || rhs.isMinusInfinity())
         return minusInfinity();
     if (lhs.isPlusInfinity() || rhs.isPlusInfinity())
@@ -365,7 +406,10 @@ Bound& Bound::assignSum(const Bound& lhs, const Bound& rhs)
 {
     if ((lhs.isMinusInfinity() && rhs.isPlusInfinity()) ||
             (lhs.isPlusInfinity() && rhs.isMinusInfinity()))
-        throw std::domain_error("indeterminate sum of opposite infinities");
+    {
+        assert(false && "indeterminate sum of opposite infinities");
+        std::abort();
+    }
     if (lhs.isMinusInfinity() || rhs.isMinusInfinity())
     {
         kind_ = Kind::MinusInfinity;
@@ -401,7 +445,10 @@ Bound Bound::divideByTwo(const Bound& bound)
 Bound Bound::divideByPositive(const Bound& bound, const Rational& divisor)
 {
     if (divisor.sign() <= 0)
-        throw std::invalid_argument("bound divisor must be positive");
+    {
+        assert(false && "bound divisor must be positive");
+        std::abort();
+    }
     if (!bound.isFinite())
         return bound;
     return finite(bound.value_ / divisor, bound.strict_);
@@ -533,7 +580,10 @@ bool Interval::isSubsetOf(const Interval& other) const
 const Rational& Interval::singletonValue() const
 {
     if (!isSingleton())
-        throw std::domain_error("interval is not a singleton");
+    {
+        assert(false && "interval is not a singleton");
+        std::abort();
+    }
     return lower_.value();
 }
 
@@ -610,7 +660,10 @@ std::string Interval::toString() const
 MpfrValue::MpfrValue(mpfr_prec_t precision)
 {
     if (precision < MPFR_PREC_MIN || precision > MPFR_PREC_MAX)
-        throw std::invalid_argument("invalid MPFR precision");
+    {
+        assert(false && "invalid MPFR precision");
+        std::abort();
+    }
     mpfr_init2(value_, precision);
     mpfr_set_zero(value_, 1);
 }
@@ -656,7 +709,10 @@ void MpfrValue::set(const Rational& value, mpfr_rnd_t rounding)
 Rational MpfrValue::toRational() const
 {
     if (!mpfr_number_p(value_))
-        throw std::domain_error("a non-finite MPFR value is not rational");
+    {
+        assert(false && "a non-finite MPFR value is not rational");
+        std::abort();
+    }
     mpq_class result;
     mpfr_get_q(result.get_mpq_t(), value_);
     result.canonicalize();
@@ -688,7 +744,10 @@ Rational FloatSemantics::evaluate(BinaryOperation operation,
                                   RoundingMode rounding)
 {
     if (significandBits < static_cast<unsigned>(MPFR_PREC_MIN))
-        throw std::invalid_argument("invalid floating significand precision");
+    {
+        assert(false && "invalid floating significand precision");
+        std::abort();
+    }
 
     const mpfr_rnd_t mode = toMpfrRounding(rounding);
     MpfrValue left(significandBits);
@@ -801,7 +860,10 @@ public:
     void writeString(const std::string& value)
     {
         if (value.size() > std::numeric_limits<std::uint32_t>::max())
-            throw std::length_error("raw state string is too large");
+        {
+            assert(false && "raw state string is too large");
+            std::abort();
+        }
         writeU32(static_cast<std::uint32_t>(value.size()));
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
@@ -825,7 +887,10 @@ private:
 std::uint64_t readTrailingU64(const NumericalDomain::RawBuffer& buffer)
 {
     if (buffer.size() < sizeof(std::uint64_t))
-        throw std::invalid_argument("raw state buffer is truncated");
+    {
+        assert(false && "raw state buffer is truncated");
+        std::abort();
+    }
     std::uint64_t value = 0;
     const std::size_t offset = buffer.size() - sizeof(std::uint64_t);
     for (unsigned index = 0; index < sizeof(std::uint64_t); ++index)
@@ -843,7 +908,10 @@ public:
         const std::uint64_t expected = readTrailingU64(bytes_);
         const std::uint64_t actual = fnv1a(bytes_.data(), limit_);
         if (actual != expected)
-            throw std::invalid_argument("raw state checksum mismatch");
+        {
+            assert(false && "raw state checksum mismatch");
+            std::abort();
+        }
     }
 
     void readMagic()
@@ -851,7 +919,10 @@ public:
         for (std::uint8_t expected : RawMagic)
         {
             if (readByte() != expected)
-                throw std::invalid_argument("raw state has invalid magic");
+            {
+                assert(false && "raw state has invalid magic");
+                std::abort();
+            }
         }
     }
 
@@ -897,14 +968,20 @@ private:
     {
         if (bytes.size() <
                 RawMagic.size() + sizeof(std::uint16_t) + 2 + sizeof(std::uint64_t))
-            throw std::invalid_argument("raw state buffer is truncated");
+        {
+            assert(false && "raw state buffer is truncated");
+            std::abort();
+        }
         return bytes.size() - sizeof(std::uint64_t);
     }
 
     void require(std::size_t size) const
     {
         if (size > limit_ - position_)
-            throw std::invalid_argument("raw state buffer is truncated");
+        {
+            assert(false && "raw state buffer is truncated");
+            std::abort();
+        }
     }
 
     const NumericalDomain::RawBuffer& bytes_;
@@ -923,7 +1000,8 @@ std::uint8_t encodeKind(NumericKind kind)
     case NumericKind::IEEEFloat:
         return 2;
     }
-    throw std::logic_error("unknown numerical kind");
+    assert(false && "unknown numerical kind");
+    std::abort();
 }
 
 NumericKind decodeKind(std::uint8_t value)
@@ -937,7 +1015,8 @@ NumericKind decodeKind(std::uint8_t value)
     case 2:
         return NumericKind::IEEEFloat;
     default:
-        throw std::invalid_argument("raw state has invalid numerical kind");
+        assert(false && "raw state has invalid numerical kind");
+        std::abort();
     }
 }
 
@@ -958,7 +1037,8 @@ std::uint8_t encodeConstraintKind(ConstraintKind kind)
     case ConstraintKind::GreaterEqual:
         return 5;
     }
-    throw std::logic_error("unknown linear constraint kind");
+    assert(false && "unknown linear constraint kind");
+    std::abort();
 }
 
 ConstraintKind decodeConstraintKind(std::uint8_t value)
@@ -978,7 +1058,8 @@ ConstraintKind decodeConstraintKind(std::uint8_t value)
     case 5:
         return ConstraintKind::GreaterEqual;
     default:
-        throw std::invalid_argument("raw state has invalid constraint kind");
+        assert(false && "raw state has invalid constraint kind");
+        std::abort();
     }
 }
 
@@ -990,8 +1071,8 @@ DomainTag domainTag(const NumericalDomain& state)
         return DomainTag::Octagon;
     if (state.isDomain<ConvexPolyhedraDomain>())
         return DomainTag::ConvexPolyhedra;
-    throw std::invalid_argument(
-        "raw serialization does not support this domain");
+    assert(false && "raw serialization does not support this domain");
+    std::abort();
 }
 
 std::uint8_t configurationFlags(const NumericalDomain& state, DomainTag tag)
@@ -1011,7 +1092,8 @@ std::uint8_t configurationFlags(const NumericalDomain& state, DomainTag tag)
     case DomainTag::ConvexPolyhedra:
         return static_cast<const ConvexPolyhedraDomain&>(state).config().integerTightening ? 1U : 0U;
     }
-    throw std::logic_error("unknown raw state domain tag");
+    assert(false && "unknown raw state domain tag");
+    std::abort();
 }
 
 void writeVariable(Writer& writer, Variable variable)
@@ -1035,7 +1117,10 @@ Variable readVariable(Reader& reader)
 void writeConstraints(Writer& writer, const LinearConstraintSet& constraints)
 {
     if (constraints.size() > std::numeric_limits<std::uint32_t>::max())
-        throw std::length_error("raw state has too many constraints");
+    {
+        assert(false && "raw state has too many constraints");
+        std::abort();
+    }
     writer.writeU32(static_cast<std::uint32_t>(constraints.size()));
     for (const LinearConstraint& constraint : constraints)
     {
@@ -1043,7 +1128,10 @@ void writeConstraints(Writer& writer, const LinearConstraintSet& constraints)
         writer.writeString(constraint.expression().constant().toString());
         const auto& terms = constraint.expression().terms();
         if (terms.size() > std::numeric_limits<std::uint32_t>::max())
-            throw std::length_error("raw state constraint has too many terms");
+        {
+            assert(false && "raw state constraint has too many terms");
+            std::abort();
+        }
         writer.writeU32(static_cast<std::uint32_t>(terms.size()));
         for (const auto& [variable, coefficient] : terms)
         {
@@ -1070,22 +1158,21 @@ Rational readRational(Reader& reader)
 {
     const std::string encoded = reader.readString();
     if (encoded.empty())
-        throw std::invalid_argument("raw state contains an empty rational");
-    try
     {
-        return Rational(encoded);
+        assert(false && "raw state contains an empty rational");
+        std::abort();
     }
-    catch (const std::exception&)
-    {
-        throw std::invalid_argument("raw state contains an invalid rational");
-    }
+    return Rational(encoded);
 }
 
 LinearConstraintSet readConstraints(Reader& reader)
 {
     const std::uint32_t count = reader.readU32();
     if (count > MaxCollectionEntries)
-        throw std::invalid_argument("raw state has too many constraints");
+    {
+        assert(false && "raw state has too many constraints");
+        std::abort();
+    }
     LinearConstraintSet constraints;
     constraints.reserve(count);
     for (std::uint32_t index = 0; index < count; ++index)
@@ -1094,14 +1181,19 @@ LinearConstraintSet readConstraints(Reader& reader)
         LinearExpression expression(readRational(reader));
         const std::uint32_t termCount = reader.readU32();
         if (termCount > MaxCollectionEntries)
-            throw std::invalid_argument("raw state has too many terms");
+        {
+            assert(false && "raw state has too many terms");
+            std::abort();
+        }
         std::set<Variable> seen;
         for (std::uint32_t term = 0; term < termCount; ++term)
         {
             const Variable variable = readVariable(reader);
             if (!seen.insert(variable).second)
-                throw std::invalid_argument(
-                    "raw state constraint repeats a variable");
+            {
+                assert(false && "raw state constraint repeats a variable");
+                std::abort();
+            }
             expression.setCoefficient(variable, readRational(reader));
         }
         constraints.emplace_back(std::move(expression), kind);
@@ -1120,7 +1212,8 @@ DomainTag decodeDomainTag(std::uint8_t value)
     case static_cast<std::uint8_t>(DomainTag::ConvexPolyhedra):
         return DomainTag::ConvexPolyhedra;
     default:
-        throw std::invalid_argument("raw state has an unknown domain tag");
+        assert(false && "raw state has an unknown domain tag");
+        std::abort();
     }
 }
 
@@ -1133,7 +1226,10 @@ std::unique_ptr<NumericalDomain> restore(DomainTag tag, std::uint8_t flags,
     case DomainTag::Box:
     {
         if ((flags & ~1U) != 0)
-            throw std::invalid_argument("raw Box state has invalid flags");
+        {
+            assert(false && "raw Box state has invalid flags");
+            std::abort();
+        }
         BoxSemanticConfig config;
         config.integerTightening = (flags & 1U) != 0;
         BoxDomain state = bottom
@@ -1144,7 +1240,10 @@ std::unique_ptr<NumericalDomain> restore(DomainTag tag, std::uint8_t flags,
     case DomainTag::Octagon:
     {
         if ((flags & ~3U) != 0)
-            throw std::invalid_argument("raw Octagon state has invalid flags");
+        {
+            assert(false && "raw Octagon state has invalid flags");
+            std::abort();
+        }
         OctagonConfig config;
         config.integerTightening = (flags & 1U) != 0;
         config.strongClosure = (flags & 2U) != 0;
@@ -1154,14 +1253,18 @@ std::unique_ptr<NumericalDomain> restore(DomainTag tag, std::uint8_t flags,
     case DomainTag::ConvexPolyhedra:
     {
         if ((flags & ~1U) != 0)
-            throw std::invalid_argument("raw Polyhedra state has invalid flags");
+        {
+            assert(false && "raw Polyhedra state has invalid flags");
+            std::abort();
+        }
         ConvexPolyhedraConfig config;
         config.integerTightening = (flags & 1U) != 0;
         return std::make_unique<ConvexPolyhedraDomain>(bottom ? ConvexPolyhedraDomain::bottom(config)
                 : ConvexPolyhedraDomain::fromConstraints(constraints, config));
     }
     }
-    throw std::logic_error("unknown raw state domain tag");
+    assert(false && "unknown raw state domain tag");
+    std::abort();
 }
 
 Interval bottomInterval()
@@ -1389,7 +1492,10 @@ IEEEFormatBounds ieeeBounds(const FloatFormat& format)
 {
     if (format.exponentBits < 2 || format.exponentBits >= 63 ||
             format.significandBits < 2)
-        throw std::invalid_argument("invalid IEEE floating format");
+    {
+        assert(false && "invalid IEEE floating format");
+        std::abort();
+    }
     const std::uint64_t bias =
         (std::uint64_t(1) << (format.exponentBits - 1)) - 1;
     const Rational maximum =
@@ -1585,8 +1691,10 @@ Interval evaluateTree(const NumericalDomain& state,
                             expression.type(), expression.roundingMode());
     case TreeExpression::Kind::Variable:
         if (expression.variable().type() != expression.type())
-            throw std::invalid_argument(
-                "tree variable type does not match its stable identity");
+        {
+            assert(false && "tree variable type does not match its stable identity");
+            std::abort();
+        }
         return state.bound(expression.variable());
     case TreeExpression::Kind::Unary:
     {
@@ -1800,8 +1908,10 @@ Interval remainder(const Interval& lhs, const Interval& rhs)
 Interval integerRange(unsigned bitWidth, bool isSigned)
 {
     if (bitWidth == 0)
-        throw std::invalid_argument(
-            "integer width must be positive");
+    {
+        assert(false && "integer width must be positive");
+        std::abort();
+    }
 
     mpz_class magnitude = 1;
     mpz_mul_2exp(magnitude.get_mpz_t(), magnitude.get_mpz_t(),
@@ -2161,8 +2271,10 @@ void NumericalDomain::assignParallel(const TreeAssignmentList& assignments)
     for (const TreeAssignment& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument(
-                "parallel tree assignment contains a duplicate target");
+        {
+            assert(false && "parallel tree assignment contains a duplicate target");
+            std::abort();
+        }
         if (const std::optional<LinearExpression> linear =
                     assignment.expression.asLinear())
             affine.push_back({assignment.target, *linear});
@@ -2261,8 +2373,10 @@ void NumericalDomain::substituteParallel(const TreeAssignmentList& assignments)
     for (const TreeAssignment& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument(
-                "parallel substitution contains a duplicate target");
+        {
+            assert(false && "parallel substitution contains a duplicate target");
+            std::abort();
+        }
         if (const std::optional<LinearExpression> linear =
                     assignment.expression.asLinear())
             affine.push_back({assignment.target, *linear});
@@ -2486,18 +2600,29 @@ std::unique_ptr<NumericalDomain> NumericalDomain::deserializeRaw(
     Reader reader(buffer);
     reader.readMagic();
     if (reader.readU16() != RawVersion)
-        throw std::invalid_argument("raw state has an unsupported version");
+    {
+        assert(false && "raw state has an unsupported version");
+        std::abort();
+    }
     const DomainTag tag = decodeDomainTag(reader.readByte());
     const std::uint8_t flags = reader.readByte();
     const std::uint8_t bottomByte = reader.readByte();
     if (bottomByte > 1)
-        throw std::invalid_argument("raw state has an invalid bottom flag");
+    {
+        assert(false && "raw state has an invalid bottom flag");
+        std::abort();
+    }
     const LinearConstraintSet constraints = readConstraints(reader);
     if (!reader.empty())
-        throw std::invalid_argument("raw state has trailing data");
+    {
+        assert(false && "raw state has trailing data");
+        std::abort();
+    }
     if (bottomByte != 0 && !constraints.empty())
-        throw std::invalid_argument(
-            "raw bottom state unexpectedly contains constraints");
+    {
+        assert(false && "raw bottom state unexpectedly contains constraints");
+        std::abort();
+    }
     return restore(tag, flags, bottomByte != 0, constraints);
 }
 
@@ -2657,6 +2782,16 @@ std::unique_ptr<AbstractDomain> BoxDomain::clone() const
     return std::make_unique<BoxDomain>(*this);
 }
 
+void BoxDomain::assignInterval(Variable target, const Interval& value)
+{
+    if (bottom_)
+        return;
+    recordOperation(value.isTop() ? OperationKind::Forget : OperationKind::Assumption,
+                    ApproximationKind::Exact, true);
+    if (boundAt(target) != value)
+        setBound(target, value);
+}
+
 void BoxDomain::assign(Variable target, const LinearExpression& expression)
 {
     recordOperation(OperationKind::Assignment, ApproximationKind::Exact, true);
@@ -2687,8 +2822,10 @@ void BoxDomain::assignParallel(const LinearAssignmentList& assignments)
     for (const LinearAssignment& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument(
-                "parallel assignment contains a duplicate target");
+        {
+            assert(false && "parallel assignment contains a duplicate target");
+            std::abort();
+        }
     }
     recordOperation(OperationKind::Assignment, ApproximationKind::Exact, true);
     if (bottom_)
@@ -2715,8 +2852,10 @@ void BoxDomain::substituteParallel(const LinearAssignmentList& assignments)
     {
         if (!replacements.emplace(assignment.target, assignment.expression)
                 .second)
-            throw std::invalid_argument(
-                "parallel substitution contains a duplicate target");
+        {
+            assert(false && "parallel substitution contains a duplicate target");
+            std::abort();
+        }
     }
     recordOperation(OperationKind::Substitution, ApproximationKind::Exact,
                     true);
@@ -2888,11 +3027,15 @@ void BoxDomain::expand(Variable source, const std::vector<Variable>& copies)
     for (Variable copy : copies)
     {
         if (copy == source || !seen.insert(copy).second)
-            throw std::invalid_argument(
-                "expanded variables must be distinct from the source");
+        {
+            assert(false && "expanded variables must be distinct from the source");
+            std::abort();
+        }
         if (copy.type() != source.type())
-            throw std::invalid_argument(
-                "expanded variables must have the source numeric type");
+        {
+            assert(false && "expanded variables must have the source numeric type");
+            std::abort();
+        }
     }
     if (copies.empty())
     {
@@ -2913,11 +3056,15 @@ void BoxDomain::fold(Variable target, const std::vector<Variable>& folded)
     for (Variable variable : folded)
     {
         if (variable == target || !seen.insert(variable).second)
-            throw std::invalid_argument(
-                "folded variables must be distinct non-target variables");
+        {
+            assert(false && "folded variables must be distinct non-target variables");
+            std::abort();
+        }
         if (variable.type() != target.type())
-            throw std::invalid_argument(
-                "folded variables must have the target numeric type");
+        {
+            assert(false && "folded variables must have the target numeric type");
+            std::abort();
+        }
         sources.push_back(variable);
     }
     if (folded.empty())
@@ -3355,16 +3502,24 @@ void BoxDomain::canonicalize(Variable variable)
 
 void BoxDomain::setBound(Variable variable, Interval interval)
 {
-    // A stable ID denotes one typed variable for the lifetime of an analysis.
-    // Detect accidental ID reuse before touching the physical slot.
-    (void)boundAt(variable);
-    if (interval.isTop())
+    const Interval& previous = boundAt(variable);
+    if (previous == interval)
+        return;
+    if (config_.integerTightening && variable.type().kind == NumericKind::Integer &&
+            ((interval.lower().isFinite() && (interval.lower().isStrict() ||
+               !interval.lower().value().isInteger())) ||
+             (interval.upper().isFinite() && (interval.upper().isStrict() ||
+               !interval.upper().value().isInteger()))))
+        interval = Interval(integerLower(interval.lower()),
+                            integerUpper(interval.upper()));
+    if (interval.isBottom())
+        makeBottom();
+    else if (interval.isTop())
         eraseBound(variable);
     else
         writablePage(variable.id() / BoundsPerPage)
         .bounds[variable.id() % BoundsPerPage] =
             BoundSlot{variable, std::move(interval)};
-    canonicalize(variable);
 }
 
 const Interval& BoxDomain::boundAt(Variable variable) const
@@ -3383,8 +3538,10 @@ const Interval& BoxDomain::boundAt(Variable variable) const
     if (!slot)
         return top;
     if (slot->variable != variable)
-        throw std::invalid_argument(
-            "Variable ID was reused with a different numeric type");
+    {
+        assert(false && "Variable ID was reused with a different numeric type");
+        std::abort();
+    }
     return slot->interval;
 }
 
@@ -3419,8 +3576,10 @@ void BoxDomain::eraseBound(Variable variable)
     if (!existing->page->bounds[offset])
         return;
     if (existing->page->bounds[offset]->variable != variable)
-        throw std::invalid_argument(
-            "Variable ID was reused with a different numeric type");
+    {
+        assert(false && "Variable ID was reused with a different numeric type");
+        std::abort();
+    }
     auto iterator =
         std::lower_bound(boundPages_.begin(), boundPages_.end(), pageIndex,
                          [](const BoundPageEntry& entry, std::size_t index)
@@ -3489,6 +3648,328 @@ void BoxDomain::report(OperationKind operation, ApproximationKind approximation,
     if (config_.diagnostics)
         config_.diagnostics->report(
     {operation, approximation, std::move(reason)});
+}
+
+LinearExpression::LinearExpression() = default;
+
+LinearExpression::LinearExpression(Rational constant)
+    : constant_(std::move(constant))
+{
+}
+LinearExpression::LinearExpression(Variable variable)
+{
+    terms_.emplace(variable, Rational(1));
+}
+
+Rational LinearExpression::coefficient(Variable variable) const
+{
+    const auto it = terms_.find(variable);
+    return it == terms_.end() ? Rational() : it->second;
+}
+
+LinearExpression& LinearExpression::setCoefficient(Variable variable,
+        Rational coefficient)
+{
+    if (coefficient.isZero())
+        terms_.erase(variable);
+    else
+        terms_[variable] = std::move(coefficient);
+    return *this;
+}
+
+LinearExpression& LinearExpression::setConstant(Rational constant)
+{
+    constant_ = std::move(constant);
+    return *this;
+}
+
+LinearExpression& LinearExpression::operator+=(const LinearExpression& rhs)
+{
+    constant_ += rhs.constant_;
+    for (const auto& [variable, coefficient] : rhs.terms_)
+        terms_[variable] += coefficient;
+    removeZeroTerms();
+    return *this;
+}
+
+LinearExpression& LinearExpression::operator-=(const LinearExpression& rhs)
+{
+    constant_ -= rhs.constant_;
+    for (const auto& [variable, coefficient] : rhs.terms_)
+        terms_[variable] -= coefficient;
+    removeZeroTerms();
+    return *this;
+}
+
+LinearExpression& LinearExpression::operator*=(const Rational& scalar)
+{
+    constant_ *= scalar;
+    for (auto& [variable, coefficient] : terms_)
+    {
+        (void)variable;
+        coefficient *= scalar;
+    }
+    removeZeroTerms();
+    return *this;
+}
+
+LinearExpression LinearExpression::substituted(
+    const std::map<Variable, LinearExpression>& replacements) const
+{
+    LinearExpression result(constant_);
+    for (const auto& [variable, coefficient] : terms_)
+    {
+        const auto replacement = replacements.find(variable);
+        if (replacement == replacements.end())
+            result.setCoefficient(variable,
+                                  result.coefficient(variable) + coefficient);
+        else
+            result += replacement->second * coefficient;
+    }
+    return result;
+}
+
+void LinearExpression::removeZeroTerms()
+{
+    for (auto it = terms_.begin(); it != terms_.end();)
+    {
+        if (it->second.isZero())
+            it = terms_.erase(it);
+        else
+            ++it;
+    }
+}
+
+std::string LinearExpression::toString() const
+{
+    std::ostringstream output;
+    bool first = true;
+    for (const auto& [variable, coefficient] : terms_)
+    {
+        if (!first)
+            output << " + ";
+        first = false;
+        output << coefficient.toString() << '*';
+        output << 'v' << variable.id();
+    }
+    if (!constant_.isZero() || first)
+    {
+        if (!first)
+            output << " + ";
+        output << constant_.toString();
+    }
+    return output.str();
+}
+
+TreeExpression TreeExpression::constant(Rational value, NumericType type)
+{
+    TreeExpression expression;
+    expression.kind_ = Kind::Constant;
+    expression.type_ = type;
+    expression.constant_ = std::move(value);
+    return expression;
+}
+
+TreeExpression TreeExpression::variable(Variable value, NumericType type)
+{
+    TreeExpression expression;
+    expression.kind_ = Kind::Variable;
+    expression.type_ = type;
+    expression.variable_ = value;
+    return expression;
+}
+
+TreeExpression TreeExpression::unary(UnaryNumericOp operation,
+                                     TreeExpression operand, NumericType type,
+                                     RoundingMode rounding)
+{
+    TreeExpression expression;
+    expression.kind_ = Kind::Unary;
+    expression.type_ = type;
+    expression.unaryOperator_ = operation;
+    expression.roundingMode_ = rounding;
+    expression.lhs_ = std::make_shared<TreeExpression>(std::move(operand));
+    return expression;
+}
+
+TreeExpression TreeExpression::binary(BinaryNumericOp operation,
+                                      TreeExpression lhs, TreeExpression rhs,
+                                      NumericType type, RoundingMode rounding)
+{
+    TreeExpression expression;
+    expression.kind_ = Kind::Binary;
+    expression.type_ = type;
+    expression.binaryOperator_ = operation;
+    expression.roundingMode_ = rounding;
+    expression.lhs_ = std::make_shared<TreeExpression>(std::move(lhs));
+    expression.rhs_ = std::make_shared<TreeExpression>(std::move(rhs));
+    return expression;
+}
+
+const TreeExpression& TreeExpression::lhs() const
+{
+    if (!lhs_)
+    {
+        assert(false && "tree expression has no left operand");
+        std::abort();
+    }
+    return *lhs_;
+}
+
+const TreeExpression& TreeExpression::rhs() const
+{
+    if (!rhs_)
+    {
+        assert(false && "tree expression has no right operand");
+        std::abort();
+    }
+    return *rhs_;
+}
+
+std::optional<LinearExpression> TreeExpression::asLinear() const
+{
+    if (type_.kind == NumericKind::IEEEFloat)
+        return std::nullopt;
+
+    switch (kind_)
+    {
+    case Kind::Constant:
+        return LinearExpression(constant_);
+    case Kind::Variable:
+        return LinearExpression(variable_);
+    case Kind::Unary:
+    {
+        if (unaryOperator_ != UnaryNumericOp::Negate)
+            return std::nullopt;
+        std::optional<LinearExpression> operand = lhs().asLinear();
+        return operand ? std::optional<LinearExpression>(-*operand)
+               : std::nullopt;
+    }
+    case Kind::Binary:
+    {
+        std::optional<LinearExpression> left = lhs().asLinear();
+        std::optional<LinearExpression> right = rhs().asLinear();
+        if (!left || !right)
+            return std::nullopt;
+        switch (binaryOperator_)
+        {
+        case BinaryNumericOp::Add:
+            return *left + *right;
+        case BinaryNumericOp::Subtract:
+            return *left - *right;
+        case BinaryNumericOp::Multiply:
+            if (left->terms().empty())
+                return *right * left->constant();
+            if (right->terms().empty())
+                return *left * right->constant();
+            return std::nullopt;
+        case BinaryNumericOp::Divide:
+            if (right->terms().empty() && !right->constant().isZero())
+                return *left * (Rational(1) / right->constant());
+            return std::nullopt;
+        case BinaryNumericOp::Remainder:
+            return std::nullopt;
+        }
+    }
+    }
+    return std::nullopt;
+}
+
+LinearConstraint::LinearConstraint(LinearExpression expression,
+                                   ConstraintKind kind)
+    : expression_(std::move(expression)), kind_(kind)
+{
+}
+
+std::string LinearConstraint::toString() const
+{
+    const char* relation;
+    switch (kind_)
+    {
+    case ConstraintKind::Equal:
+        relation = "==";
+        break;
+    case ConstraintKind::NotEqual:
+        relation = "!=";
+        break;
+    case ConstraintKind::LessThan:
+        relation = "<";
+        break;
+    case ConstraintKind::LessEqual:
+        relation = "<=";
+        break;
+    case ConstraintKind::GreaterThan:
+        relation = ">";
+        break;
+    case ConstraintKind::GreaterEqual:
+        relation = ">=";
+        break;
+    default:
+        assert(false && "unknown linear constraint kind");
+        std::abort();
+    }
+    return expression_.toString() + ' ' + relation + " 0";
+}
+
+TreeConstraint::TreeConstraint(TreeExpression expression, ConstraintKind kind)
+    : expression_(std::move(expression)), kind_(kind)
+{
+}
+
+LinearConstraint equal(LinearExpression lhs, LinearExpression rhs)
+{
+    return LinearConstraint(std::move(lhs) - rhs, ConstraintKind::Equal);
+}
+
+LinearConstraint notEqual(LinearExpression lhs, LinearExpression rhs)
+{
+    return LinearConstraint(std::move(lhs) - rhs, ConstraintKind::NotEqual);
+}
+
+LinearConstraint lessEqual(LinearExpression lhs, LinearExpression rhs)
+{
+    return LinearConstraint(std::move(lhs) - rhs, ConstraintKind::LessEqual);
+}
+
+LinearConstraint lessThan(LinearExpression lhs, LinearExpression rhs)
+{
+    return LinearConstraint(std::move(lhs) - rhs, ConstraintKind::LessThan);
+}
+
+LinearConstraint greaterEqual(LinearExpression lhs, LinearExpression rhs)
+{
+    return LinearConstraint(std::move(lhs) - rhs, ConstraintKind::GreaterEqual);
+}
+
+LinearConstraint greaterThan(LinearExpression lhs, LinearExpression rhs)
+{
+    return LinearConstraint(std::move(lhs) - rhs, ConstraintKind::GreaterThan);
+}
+
+std::unique_ptr<NumericalDomain> makeOctagonDomain(
+    bool bottom, const OctagonConfig& config)
+{
+    return std::make_unique<OctagonDomain>(
+               bottom ? OctagonDomain::bottom(config) : OctagonDomain::top(config));
+}
+
+std::unique_ptr<NumericalDomain> makeNumericalDomain(
+    DomainKind kind, bool bottom, const OctagonConfig& config)
+{
+    switch (kind)
+    {
+    case DomainKind::Box:
+        return std::make_unique<BoxDomain>(
+                   bottom ? BoxDomain::bottom() : BoxDomain::top());
+    case DomainKind::Octagon:
+        return makeOctagonDomain(bottom, config);
+    case DomainKind::ConvexPolyhedra:
+        return std::make_unique<ConvexPolyhedraDomain>(
+                   bottom ? ConvexPolyhedraDomain::bottom() : ConvexPolyhedraDomain::top());
+    default:
+        assert(false && "domain kind is not numerical");
+        std::abort();
+    }
 }
 
 } // namespace SVF

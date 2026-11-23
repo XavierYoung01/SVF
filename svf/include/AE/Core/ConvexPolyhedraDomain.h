@@ -24,8 +24,6 @@
 #ifndef SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
 #define SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
 
-#include "AE/Core/DimensionLayout.h"
-#include "AE/Core/Expression.h"
 #include "AE/Core/NumericalDomain.h"
 
 #include <memory>

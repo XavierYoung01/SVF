@@ -17,7 +17,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 //
-// Contributors: Xiao Cheng, Jiawei Wang
+// Contributors: Jiawei Yang
 //
 //===----------------------------------------------------------------------===//
 
@@ -27,6 +27,8 @@
 #include "AE/Core/BoxAddressDomain.h"
 
 #include <cstdint>
+#include <functional>
+#include <utility>
 #include <map>
 #include <set>
 #include <vector>
@@ -38,6 +40,9 @@ class FunObjVar;
 class ObjVar;
 class SVFIR;
 class ValVar;
+class SVFVar;
+class LoadStmt;
+class ICFGNode;
 
 /// Owns the IR-specific identity mapping. Abstract-domain states only see
 /// Variable and Location; they never depend on SVF NodeID or SVFIR classes.
@@ -49,6 +54,13 @@ public:
     /// SVFIR's double projection can overflow for extended FP constants.
     /// Such values have no rational singleton; retain an unconstrained number.
     static SVF::Interval floatingConstant(double value);
+
+    /// Strip truth-preserving Boolean casts and complements. The polarity
+    /// describes the value required of the returned condition.
+    static const SVFVar* booleanCondition(const SVFVar* value, bool& taken);
+
+    /// Whether the load's memory is unchanged along the intra-block chain.
+    static bool loadedMemoryStillCurrent(const LoadStmt* load, const ICFGNode* node);
 
     bool contains(const ValVar& value) const;
     bool contains(const ObjVar& object) const;
@@ -83,6 +95,11 @@ public:
     const SVF::MemoryLayout& memoryLayout() const
     {
         return memoryLayout_;
+    }
+
+    void setObjectRegistration(std::function<void(const ObjVar&, SVF::Variable)> registration)
+    {
+        objectRegistration_ = std::move(registration);
     }
 
     /// D-005 item 3: after V is frozen, a field object first seen by the main
@@ -124,6 +141,7 @@ private:
     mutable bool runtimeFieldsFrozen_ = false;
     mutable std::map<const ObjVar*, SVF::Variable> runtimeFieldSummaries_;
     mutable std::set<const ObjVar*> summarizedFields_;
+    std::function<void(const ObjVar&, SVF::Variable)> objectRegistration_;
     std::uint32_t firstObjectContentVariableId_ = 1;
 };
 

@@ -19,6 +19,16 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 //===----------------------------------------------------------------------===//
+//
+// Loop and recursion handling factored out of AbstractInterpretation.cpp.
+// Contains:
+//   * The widen/narrow fixpoint driver (handleLoopOrRecursion)
+//   * The dense base cycle helpers (getFullCycleHeadState /
+//     widenCycleState / narrowCycleState — semi-sparse overrides live in
+//     SparseAbstractInterpretation.cpp)
+//   * Recursion-specific helpers (isRecursiveFun, isRecursiveCallSite,
+//     skipRecursiveCall, skipRecursionWithTop, shouldApplyNarrowing)
+//
 
 #include "AE/Svfexe/AEWTO.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
@@ -255,7 +265,7 @@ bool AbstractInterpretation::widenCycleState(
     const bool fixpoint =
         next.isEquivalentTo(previousDense) == SVF::CheckResult::True;
     const ICFGNode* head = cycle->head()->getICFGNode();
-    stateTrace_.insert_or_assign(head, std::move(next));
+    abstractTrace_.insert_or_assign(head, std::move(next));
     return fixpoint;
 }
 
@@ -282,7 +292,7 @@ bool AbstractInterpretation::narrowCycleState(
     const bool fixpoint =
         next.isEquivalentTo(previousDense) == SVF::CheckResult::True;
     if (!fixpoint)
-        stateTrace_.insert_or_assign(head, std::move(next));
+        abstractTrace_.insert_or_assign(head, std::move(next));
     return fixpoint;
 }
 
@@ -344,6 +354,9 @@ void AbstractInterpretation::handleLoopOrRecursion(const ICFGCycleWTO* cycle,
     // head. Otherwise the final successor states may still correspond to the
     // previous narrowing iterate and fail the original transfer equations.
     bool narrowingHeadStable = false;
+    const bool sparseBox = numericalDomain() == AENumericalDomain::Box &&
+                           sparsity() != Dense;
+    std::unique_ptr<SVF::AbstractDomain> previousCycleState;
     u32_t widen_delay = Options::WidenDelay();
     for (u32_t cur_iter = 0;; cur_iter++)
     {
@@ -352,7 +365,8 @@ void AbstractInterpretation::handleLoopOrRecursion(const ICFGCycleWTO* cycle,
             // cloneCycleHeadState handles dense (returns trace[cycle_head])
             // and semi-sparse (collects ValVars from def-sites) uniformly.
             std::unique_ptr<SVF::AbstractDomain> previous =
-                cloneCycleHeadState(cycle);
+                sparseBox && previousCycleState
+                ? std::move(previousCycleState) : cloneCycleHeadState(cycle);
 
             if (mergeStatesFromPredecessors(cycle_head))
                 handleICFGNode(cycle_head);
@@ -363,6 +377,8 @@ void AbstractInterpretation::handleLoopOrRecursion(const ICFGCycleWTO* cycle,
             {
                 const bool stateFixpoint =
                     widenCycleState(*previous, *current, cycle);
+                if (sparseBox)
+                    previousCycleState = cloneCycleHeadState(cycle);
                 if (stateFixpoint)
                 {
                     increasing = false;
@@ -373,6 +389,8 @@ void AbstractInterpretation::handleLoopOrRecursion(const ICFGCycleWTO* cycle,
             {
                 const bool stateFixpoint =
                     narrowCycleState(*previous, *current, cycle);
+                if (sparseBox)
+                    previousCycleState = cloneCycleHeadState(cycle);
                 if (stateFixpoint)
                 {
                     if (narrowingHeadStable)
@@ -388,6 +406,8 @@ void AbstractInterpretation::handleLoopOrRecursion(const ICFGCycleWTO* cycle,
             // Before widen_delay: process cycle head with gated pattern
             if (mergeStatesFromPredecessors(cycle_head))
                 handleICFGNode(cycle_head);
+            if (sparseBox)
+                previousCycleState = cloneCycleHeadState(cycle);
         }
 
         // Process cycle body components (each with gated merge+handle)

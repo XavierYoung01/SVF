@@ -23,10 +23,11 @@
 
 #include "AE/Core/AddressDomain.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <algorithm>
 #include <iterator>
 #include <sstream>
-#include <stdexcept>
 #include <utility>
 
 namespace SVF
@@ -244,7 +245,10 @@ bool AddressSet::hasIntersection(const AddressSet& other) const
 std::size_t AddressSet::size() const
 {
     if (allObjects_)
-        throw std::logic_error("object-top address set has no finite size");
+    {
+        assert(false && "object-top address set has no finite size");
+        std::abort();
+    }
     return locations_.size();
 }
 
@@ -256,8 +260,10 @@ bool AddressSet::empty() const
 const FiniteLocationSet& AddressSet::locations() const
 {
     if (allObjects_)
-        throw std::logic_error(
-            "object-top address set has no finite enumeration");
+    {
+        assert(false && "object-top address set has no finite enumeration");
+        std::abort();
+    }
     return locations_;
 }
 
@@ -663,8 +669,10 @@ const AddressSet* AddressDomain::findValue(Variable variable) const
                 iterator->first.id() != variable.id())
             return nullptr;
         if (iterator->first != variable)
-            throw std::invalid_argument(
-                "Variable ID was reused with a different numeric type");
+        {
+            assert(false && "Variable ID was reused with a different numeric type");
+            std::abort();
+        }
         return &iterator->second;
     }
     const std::size_t pageIndex = variable.id() / ValuesPerPage;
@@ -681,8 +689,10 @@ const AddressSet* AddressDomain::findValue(Variable variable) const
     if (!value)
         return nullptr;
     if (value->variable != variable)
-        throw std::invalid_argument(
-            "Variable ID was reused with a different numeric type");
+    {
+        assert(false && "Variable ID was reused with a different numeric type");
+        std::abort();
+    }
     return &value->addresses;
 }
 
@@ -701,8 +711,10 @@ void AddressDomain::storeValue(Variable variable, AddressSet addresses)
                 iterator->first.id() == variable.id())
         {
             if (iterator->first != variable)
-                throw std::invalid_argument(
-                    "Variable ID was reused with a different numeric type");
+            {
+                assert(false && "Variable ID was reused with a different numeric type");
+                std::abort();
+            }
             iterator->second = std::move(addresses);
             return;
         }
@@ -718,8 +730,10 @@ void AddressDomain::storeValue(Variable variable, AddressSet addresses)
     if (!slot)
         ++size_;
     else if (slot->variable != variable)
-        throw std::invalid_argument(
-            "Variable ID was reused with a different numeric type");
+    {
+        assert(false && "Variable ID was reused with a different numeric type");
+        std::abort();
+    }
     slot = ValueSlot{variable, std::move(addresses)};
 }
 
@@ -738,8 +752,10 @@ void AddressDomain::eraseValue(Variable variable)
                 iterator->first.id() == variable.id())
         {
             if (iterator->first != variable)
-                throw std::invalid_argument(
-                    "Variable ID was reused with a different numeric type");
+            {
+                assert(false && "Variable ID was reused with a different numeric type");
+                std::abort();
+            }
             values.erase(iterator);
             --size_;
         }
@@ -761,8 +777,10 @@ void AddressDomain::eraseValue(Variable variable)
     if (!slot)
         return;
     if (slot->variable != variable)
-        throw std::invalid_argument(
-            "Variable ID was reused with a different numeric type");
+    {
+        assert(false && "Variable ID was reused with a different numeric type");
+        std::abort();
+    }
     slot.reset();
     --size_;
     if (pageIsEmpty(*iterator->page))

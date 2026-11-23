@@ -1,4 +1,4 @@
-//===- AbstractInterpretation.cpp -- Abstract interpretation -------------===//
+//===- AbstractExecution.cpp -- Abstract Execution---------------------------------//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -20,38 +20,43 @@
 //
 //===----------------------------------------------------------------------===//
 
+
 //
 //  Created on: Jan 10, 2024
 //      Author: Xiao Cheng, Jiawei Wang
 //
 
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include "AE/Svfexe/AbsExtAPI.h"
-#include "AE/Svfexe/SparseAbstractInterpretation.h"
-#include "AE/Svfexe/OhPackedAbstractInterpretation.h"
-#include "AE/Svfexe/VersionedSparseAbstractInterpretation.h"
-#include "AE/Svfexe/StatementRelationPacking.h"
-#include "AE/Svfexe/ImpactRelationPacking.h"
-#include "AE/Svfexe/AllocationSize.h"
-#include "AE/Svfexe/SAS16FeatureExtraction.h"
-#include "AE/Core/NumericalDomainFactory.h"
-#include "AE/Core/PartialRelationalDomain.h"
+#include "AE/Core/NumericalDomain.h"
 #include "AE/Core/PackedRelationalDomain.h"
+#include "AE/Core/PartialRelationalDomain.h"
+#include "AE/Svfexe/AbsExtAPI.h"
+#include "AE/Svfexe/AllocationSize.h"
+#include "AE/Svfexe/ImpactRelationPacking.h"
+#include "AE/Svfexe/OhPackedAbstractInterpretation.h"
+#include "AE/Svfexe/SAS16FeatureExtraction.h"
+#include "AE/Svfexe/SparseAbstractInterpretation.h"
+#include "AE/Svfexe/StatementRelationPacking.h"
+#include "AE/Svfexe/VersionedSparseAbstractInterpretation.h"
 #include "Graphs/CallGraph.h"
+#include "Graphs/SparseObjGraph.h"
+#include "MSSA/SVFGBuilder.h"
 #include "SVFIR/SVFIR.h"
 #include "Util/Options.h"
 #include "Util/WorkList.h"
 #include "WPA/Andersen.h"
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <deque>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <memory>
 #include <set>
 #include <sstream>
-#include <stdexcept>
 #include <tuple>
 #include <unordered_set>
 
@@ -157,19 +162,22 @@ static std::vector<const ValVar*> definitionOperands(const SVFStmt* statement)
 }
 
 static std::string queryKey(AEDetector::DetectorKind detector,
-                            const ICFGNode* node, const SVFVar* operand,
-                            const std::string& queryKind, const SVFStmt* site = nullptr)
+                            const ICFGNode* node, const std::string& queryKind, const SVFStmt* site = nullptr)
 {
     if (site)
     {
         if (site->getQuerySite().empty())
-            throw std::invalid_argument("detector site lacks LLVM semantic identity");
+        {
+            assert(false && "detector site lacks LLVM semantic identity");
+            std::abort();
+        }
         return std::to_string(static_cast<unsigned>(detector)) + ":v2:" +
                site->getQuerySite() + ':' + queryKind;
     }
-    return std::to_string(static_cast<unsigned>(detector)) + ':' +
-           std::to_string(node ? node->getId() : 0) + ':' +
-           std::to_string(operand ? operand->getId() : 0) + ':' + queryKind;
+    if (!node || node->getSemanticSite().empty())
+        throw std::invalid_argument("detector node lacks LLVM semantic identity");
+    return std::to_string(static_cast<unsigned>(detector)) + ":v2:icfg:" +
+           node->getSemanticSite() + ':' + queryKind;
 }
 
 static std::string escapeQueryField(const std::string& field)
@@ -202,14 +210,17 @@ SVF::AddressSet AbstractInterpretation::blackHoleAddressSet() const
     const auto* object = SVFUtil::dyn_cast<ObjVar>(
                              svfir->getGNode(IRGraph::BlackHole));
     if (!object)
-        throw std::runtime_error("SVFIR has no BlackHole object");
+    {
+        assert(false && "SVFIR has no BlackHole object");
+        std::abort();
+    }
     return SVF::AddressSet::singleton(adapter_.location(*object));
 }
 
 void AbstractInterpretation::handleGlobalNode()
 {
     const ICFGNode* node = icfg->getGlobalICFGNode();
-    stateTrace_.insert_or_assign(node, topState());
+    abstractTrace_.insert_or_assign(node, topState());
     for (const SVFStmt* statement : node->getSVFStmts())
         handleSVFStatement(statement);
 
@@ -230,9 +241,25 @@ void AbstractInterpretation::initializeObjectValue(
     interval = SVF::Interval::bottom();
     addresses = SVF::AddressSet::bottom();
     State& denseState = ensureState(node);
-    denseState.allocate(adapter_.location(*object));
+
 
     const BaseObjVar* base = PAG::getPAG()->getBaseObject(object->getId());
+    if (intervalPreanalysis_ && ImpactRelationPacking::isExternalObject(base->getId()))
+    {
+        const auto initialize = [&](const ObjVar* external)
+        {
+            const auto content = adapter_.contentVariable(*external);
+            if (external->getType()->isPointerTy())
+                denseState.setAddressSet(content, blackHoleAddressSet());
+            else if (SVFUtil::isa<SVFIntegerType>(external->getType()))
+                denseState.setInterval(content, unknownInterval(external));
+        };
+        initialize(object);
+        if (object == base)
+            for (NodeID id : svfir->getAllFieldsObjVars(base->getId()))
+                if (const auto* field = SVFUtil::dyn_cast<ObjVar>(svfir->getGNode(id)))
+                    initialize(field);
+    }
     if (base->isStack())
     {
         // Fresh payload facets are uninitialized, independently of their
@@ -256,8 +283,12 @@ void AbstractInterpretation::initializeObjectValue(
             base->isConstantStruct())
     {
         if (const auto* integer = SVFUtil::dyn_cast<ConstIntObjVar>(object))
-            interval =
-                SVF::Interval::singleton(SVF::Rational(integer->getSExtValue()));
+        {
+            const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(integer->getType());
+            const bool boolean = numericalDomain() != AENumericalDomain::Box && type && type->isBoolean();
+            interval = SVF::Interval::singleton(SVF::Rational(
+                                                    boolean ? (integer->getSExtValue() != 0 ? 1 : 0) : integer->getSExtValue()));
+        }
         else if (const auto* floating =
                      SVFUtil::dyn_cast<ConstFPObjVar>(object))
             interval = SVFIRAdapter::floatingConstant(floating->getFPValue());
@@ -273,8 +304,10 @@ void AbstractInterpretation::initializeObjectValue(
 
 void AbstractInterpretation::initializeRelationalPolicy()
 {
-    const u32_t policy = Options::AERelationalPolicy();
-    if (policy == ClosurePackedRelational || policy == ImpactPackedRelational || policy == LearnedPackedRelational)
+    const u32_t policy = relationalPolicy();
+    if (policy == ClosurePackedRelational || policy == ImpactPackedRelational ||
+            policy == LearnedPackedRelational || policy == DuetPackedRelational ||
+            policy == SpePackedRelational)
     {
         initializeFixedPacking();
         return;
@@ -286,9 +319,11 @@ void AbstractInterpretation::initializeRelationalPolicy()
     }
     if (policy == WholeRelational)
         return;
-    if (Options::AEDomain() == AENumericalDomain::Box)
-        throw std::invalid_argument(
-            "partial relational policies require octagon or polyhedra");
+    if (numericalDomain() == AENumericalDomain::Box)
+    {
+        assert(false && "partial relational policies require octagon or polyhedra");
+        std::abort();
+    }
 
     std::vector<const ValVar*> seeds;
     const auto addSeed = [&](const SVFVar* variable)
@@ -602,8 +637,11 @@ void AbstractInterpretation::initializeRelationalPolicy()
 
 void AbstractInterpretation::initializeSyntaxPacking()
 {
-    if (Options::AEDomain() != Octagon)
-        throw std::invalid_argument("syntax-pack currently requires native Octagon");
+    if (numericalDomain() != Octagon)
+    {
+        assert(false && "syntax-pack currently requires native Octagon");
+        std::abort();
+    }
     const std::size_t cap = Options::AEPackMaxVars();
     if (cap == 0) throw std::invalid_argument("ae-pack-max-vars must be positive");
     using Group = std::set<SVF::Variable>;
@@ -734,8 +772,8 @@ void AbstractInterpretation::initializeSyntaxPacking()
 
 void AbstractInterpretation::initializeFixedPacking()
 {
-    const bool impact = Options::AERelationalPolicy() == ImpactPackedRelational;
-    if (Options::AEDomain() != Octagon)
+    const bool impact = relationalPolicy() == ImpactPackedRelational;
+    if (numericalDomain() != Octagon)
         throw std::invalid_argument(impact ? "impact-pack requires native Octagon" :
                                     "fixed packing requires native Octagon");
     std::set<SVF::Variable> vocabulary;
@@ -767,8 +805,11 @@ void AbstractInterpretation::initializeFixedPacking()
     // pack, separating executor effects from multi-variable relations.
     if (std::getenv("SVF_AE_SINGLETON_PACKS"))
     {
-        if (Options::AERelationalPolicy() != ClosurePackedRelational)
-            throw std::invalid_argument("SVF_AE_SINGLETON_PACKS requires closure-pack");
+        if (relationalPolicy() != ClosurePackedRelational)
+        {
+            assert(false && "SVF_AE_SINGLETON_PACKS requires closure-pack");
+            std::abort();
+        }
         SVF::RelationPacking packs;
         for (auto variable : *relationalVocabulary_)
             packs.push_back({variable});
@@ -778,7 +819,37 @@ void AbstractInterpretation::initializeFixedPacking()
                         << " max=1 edges=0 cap=none control=b0\n";
         return;
     }
-    if (Options::AERelationalPolicy() == LearnedPackedRelational)
+    if (relationalPolicy() == DuetPackedRelational)
+    {
+        auto packs = StatementRelationPacking(*svfir, adapter_,
+                     *preAnalysis->getPointerAnalysis()).packDuet(*relationalVocabulary_);
+        relationalPacking_ = std::make_shared<const RelationPacking>(std::move(packs));
+        return;
+    }
+    if (relationalPolicy() == SpePackedRelational)
+    {
+        std::vector<const ICFGNode*> entries;
+        auto functions = collectProgEntryFuns();
+        while (!functions.empty())
+            entries.push_back(icfg->getFunEntryICFGNode(functions.pop()));
+        std::vector<StatementPackingQuery> queries;
+        for (const auto& [key, record] : queryLedger_)
+        {
+            (void)key;
+            queries.push_back({queryIdentityFields(record).front(), icfg->getICFGNode(record.icfgNode),
+                record.statement, record.operand ? svfir->getSVFVar(record.operand) : nullptr,
+                record.queryKind});
+        }
+        std::sort(queries.begin(), queries.end(), [](const auto& a, const auto& b)
+        {
+            return a.identity < b.identity;
+        });
+        auto packs = StatementRelationPacking(*svfir, adapter_, *preAnalysis->getPointerAnalysis(),
+            &allocationSizeModel()).packSpe(*relationalVocabulary_, entries, queries);
+        relationalPacking_ = std::make_shared<const RelationPacking>(std::move(packs));
+        return;
+    }
+    if (relationalPolicy() == LearnedPackedRelational)
     {
         using PhaseClock = std::chrono::steady_clock;
         const auto secondsSince = [](PhaseClock::time_point start)
@@ -819,12 +890,23 @@ void AbstractInterpretation::initializeFixedPacking()
     }
     if (impact)
     {
+        using ImpactClock = std::chrono::steady_clock;
+        const auto intervalStart = ImpactClock::now();
+        const auto intervalCpuStart = std::clock();
+        std::unique_ptr<AbstractInterpretation> intervals;
+        if (!Options::AEImpactQueryComponents() &&
+                !std::getenv("SVF_SPARROW_PACK_IMPORT") &&
+                !std::getenv("SVF_SPARROW_VOCAB_EXPORT"))
+            intervals = intervalPreanalysis();
+        const double intervalSeconds = std::chrono::duration<double>(
+            ImpactClock::now() - intervalStart).count();
+        const double intervalCpu = double(std::clock() - intervalCpuStart) / CLOCKS_PER_SEC;
         std::vector<const ICFGNode*> entries;
         auto functions = collectProgEntryFuns();
         while (!functions.empty()) entries.push_back(icfg->getFunEntryICFGNode(functions.pop()));
         auto result = ImpactRelationPacking(*svfir, adapter_,
                                             *preAnalysis->getPointerAnalysis(), std::move(entries),
-                                            &allocationSizeModel()).pack(*relationalVocabulary_);
+                                            &allocationSizeModel(), intervals.get()).pack(*relationalVocabulary_);
         relationalPacking_ = std::make_shared<const SVF::RelationPacking>(std::move(result.packs));
         std::size_t maximum = 0, promising = 0, unsupported = 0;
         for (const auto& pack : *relationalPacking_) maximum = std::max(maximum, pack.size());
@@ -839,9 +921,18 @@ void AbstractInterpretation::initializeFixedPacking()
                         << " promising=" << promising << " unsupported=" << unsupported
                         << " transfers=" << result.transfers << " commands=" << result.commands
                         << " phi_fallbacks=" << result.phiFallbacks
-                        << " cap=none locality=promising-query-snapshots semantics=sparrow-octimpact-v2\n"
-                        << "AE_IMPACT_PREANALYSIS_SECONDS " << result.preanalysisSeconds << '\n'
-                        << "AE_IMPACT_EXTRACTION_SECONDS " << result.extractionSeconds << '\n';
+                        << " cap=none locality="
+                        << (std::getenv("SVF_SPARROW_PACK_IMPORT") ? "native-partition" : "promising-query-snapshots")
+                        << " semantics="
+                        << (std::getenv("SVF_SPARROW_PACK_IMPORT") ? "checked-native-packs" : "svf-impact-adaptation") << '\n';
+        if (std::getenv("SVF_SPARROW_PACK_IMPORT"))
+            SVFUtil::outs() << "AE_NATIVE_PACK_PREANALYSIS external=1 cost_source=manifest\n"
+                            << "AE_NATIVE_PACK_IMPORT_SECONDS " << result.extractionSeconds << '\n';
+        else
+            SVFUtil::outs() << "AE_IMPACT_INTERVAL_SECONDS " << intervalSeconds << '\n'
+                            << "AE_IMPACT_INTERVAL_CPU_SECONDS " << intervalCpu << '\n'
+                            << "AE_IMPACT_PREANALYSIS_SECONDS " << result.preanalysisSeconds << '\n'
+                            << "AE_IMPACT_EXTRACTION_SECONDS " << result.extractionSeconds << '\n';
         if (std::getenv("SVF_AE_TRACE_RELATIONAL_POLICY"))
         {
             for (auto variable : *relationalVocabulary_)
@@ -876,7 +967,8 @@ void AbstractInterpretation::initializeFixedPacking()
     }
     auto result = StatementRelationPacking(
                       *svfir, adapter_, *preAnalysis->getPointerAnalysis(),
-                      &allocationSizeModel()).pack(*relationalVocabulary_);
+                      &allocationSizeModel()).pack(*relationalVocabulary_,
+                              Options::AEClosureDifferences(), Options::AEClosureQueries());
     relationalPacking_ = std::make_shared<const SVF::RelationPacking>(std::move(result.packs));
     std::size_t maximum = 0;
     for (const auto& pack : *relationalPacking_)
@@ -884,6 +976,9 @@ void AbstractInterpretation::initializeFixedPacking()
     SVFUtil::outs() << "AE_CLOSURE_PACK packs=" << relationalPacking_->size()
                     << " variables=" << vocabulary.size() << " max=" << maximum
                     << " edges=" << result.edges.size()
+                    << " query_variables=" << result.queries.size()
+                    << " differences=" << Options::AEClosureDifferences()
+                    << " query_filter=" << Options::AEClosureQueries()
                     << " cap=none locality=statement-points-to-components\n";
     if (std::getenv("SVF_AE_TRACE_RELATIONAL_POLICY"))
     {
@@ -902,6 +997,8 @@ void AbstractInterpretation::initializeFixedPacking()
                       << " stmt=" << edge.statement
                       << " lhs=" << edge.variables.first.id()
                       << " rhs=" << edge.variables.second.id() << '\n';
+        for (const auto& query : result.queries)
+            std::cerr << "AE_CLOSURE_QUERY variable=" << query.id() << '\n';
         for (std::size_t i = 0; i < relationalPacking_->size(); ++i)
         {
             std::cerr << "AE_CLOSURE_PACK_MEMBERS " << i;
@@ -909,6 +1006,168 @@ void AbstractInterpretation::initializeFixedPacking()
                 std::cerr << ' ' << variable.id();
             std::cerr << '\n';
         }
+    }
+}
+
+void AbstractInterpretation::initializeObjectPacking()
+{
+    if (!relationalPacking_ || numericalDomain() != Octagon ||
+            std::getenv("SVF_AE_SINGLETON_PACKS"))
+        return;
+    std::map<SVF::Variable, SVF::Variable> parents;
+    const auto add = [&](SVF::Variable variable)
+    {
+        parents.emplace(variable, variable);
+    };
+    std::function<SVF::Variable(SVF::Variable)> root = [&](SVF::Variable variable)
+    {
+        const auto parent = parents.at(variable);
+        if (parent == variable) return variable;
+        return parents.at(variable) = root(parent);
+    };
+    const auto connect = [&](SVF::Variable left, SVF::Variable right)
+    {
+        add(left);
+        add(right);
+        left = root(left);
+        right = root(right);
+        if (left != right) parents.at(std::max(left, right)) = std::min(left, right);
+    };
+    std::map<const ObjVar*, SVF::Variable> bases;
+    for (const auto& pack : *relationalPacking_)
+        for (const auto variable : pack)
+        {
+            add(variable);
+            connect(pack.front(), variable);
+            const auto* object = adapter_.contentObject(variable);
+            if (!object) object = adapter_.sizeObject(variable);
+            if (!object) continue;
+            const auto* base = svfir->getBaseObject(object->getId());
+            if (!base->isArray() && base->getMaxFieldOffsetLimit() <= 1)
+                continue;
+            const auto anchor = adapter_.contentVariable(*base);
+            if (anchor.type().kind == SVF::NumericKind::IEEEFloat) continue;
+            bases.emplace(base, anchor);
+            connect(anchor, variable);
+            const auto size = adapter_.sizeVariable(*base);
+            connect(anchor, size);
+            if (std::getenv("SVF_AE_TRACE_ROOT_REASONS"))
+                std::cerr << "AE_PACK_BASE_LINK " << anchor.id() << ' ' << variable.id()
+                          << ' ' << size.id() << '\n';
+        }
+    std::map<SVF::Variable, std::vector<SVF::Variable>> components;
+    for (const auto& [variable, parent] : parents)
+    {
+        (void)parent;
+        components[root(variable)].push_back(variable);
+    }
+    SVF::PackedRelationalDomain::Packing packing;
+    std::map<SVF::Variable, std::size_t> indices;
+    for (auto& [representative, variables] : components)
+    {
+        indices.emplace(representative, packing.size());
+        packing.push_back(std::move(variables));
+    }
+    relationalPacking_ = std::make_shared<const SVF::PackedRelationalDomain::Packing>(std::move(packing));
+    for (const auto& [base, anchor] : bases) objectPacks_.emplace(base, indices.at(root(anchor)));
+    adapter_.setObjectRegistration([this](const ObjVar& object, SVF::Variable variable)
+    {
+        if (variable.type().kind == SVF::NumericKind::IEEEFloat) return;
+        const auto* base = svfir->getBaseObject(object.getId());
+        const auto found = objectPacks_.find(base);
+        if (found == objectPacks_.end()) return;
+        SVF::PackedRelationalDomain::registerVariable(relationalPacking_, found->second, variable);
+        if (std::getenv("SVF_AE_TRACE_PACK_OFFSETS"))
+            SVFUtil::outs() << "AE_PACK_OFFSET base=" << base->getId()
+                           << " object=" << object.getId() << " variable=" << variable.id()
+                           << " pack=" << found->second << '\n';
+    });
+    SVFUtil::outs() << "AE_BASE_OBJECT_PACK packs=" << relationalPacking_->size()
+                   << " objects=" << objectPacks_.size() << '\n';
+    dumpFixedPacking("AE_BASE_PACK");
+}
+
+void AbstractInterpretation::dumpFixedPacking(const char* prefix) const
+{
+    if (std::getenv("SVF_AE_TRACE_RELATIONAL_POLICY"))
+    {
+        for (std::size_t pack = 0; pack < relationalPacking_->size(); ++pack)
+        {
+            SVFUtil::outs() << prefix << "_MEMBERS " << pack;
+            for (auto variable : relationalPacking_->at(pack))
+                SVFUtil::outs() << ' ' << variable.id();
+            SVFUtil::outs() << '\n';
+            for (auto variable : relationalPacking_->at(pack))
+            {
+                const auto* value = adapter_.value(variable);
+                const auto* object = adapter_.contentObject(variable);
+                const auto* sized = adapter_.sizeObject(variable);
+                const SVFVar* origin = value ? static_cast<const SVFVar*>(value) : object ? object : sized;
+                SVFUtil::outs() << prefix << "_VARIABLE " << variable.id()
+                                << ' ' << (value ? "value" : object ? "content" : "size")
+                                << ' ' << origin->getId()
+                                << ' ' << static_cast<unsigned>(variable.type().kind)
+                                << ' ' << variable.type().floatFormat.exponentBits
+                                << ' ' << variable.type().floatFormat.significandBits
+                                << ' ' << escapeQueryField(origin->getValueName()) << '\n';
+            }
+        }
+    }
+}
+
+void AbstractInterpretation::selectBoxMayPacks()
+{
+    std::vector<StatementPackingQuery> demands;
+    for (const auto& [key, record] : queryLedger_)
+    {
+        (void)key;
+        const auto id = queryIdentityFields(record).front();
+        if (boxQueries_.at(id).outcome == "May")
+            demands.push_back({id, icfg->getICFGNode(record.icfgNode),
+                record.statement, record.operand ? svfir->getSVFVar(record.operand) : nullptr,
+                record.queryKind});
+    }
+    const auto demand = StatementRelationPacking(
+        *svfir, adapter_, *preAnalysis->getPointerAnalysis(), &allocationSizeModel())
+        .selectDemand(*relationalPacking_, demands);
+
+    const bool trace = std::getenv("SVF_AE_TRACE_RELATIONAL_POLICY") != nullptr;
+    RelationPacking filtered;
+    std::map<std::size_t, std::size_t> newIndices;
+    for (std::size_t index = 0; index < relationalPacking_->size(); ++index)
+    {
+        const auto& pack = relationalPacking_->at(index);
+        if (demand.packs.count(index))
+        {
+            newIndices.emplace(index, filtered.size());
+            if (trace)
+            {
+                std::cerr << "AE_BOX_MAY_PACK_MEMBERS " << filtered.size();
+                for (auto variable : pack)
+                    std::cerr << ' ' << variable.id();
+                std::cerr << '\n';
+            }
+            filtered.push_back(pack);
+        }
+    }
+    for (auto it = objectPacks_.begin(); it != objectPacks_.end();)
+        if (const auto index = newIndices.find(it->second); index != newIndices.end())
+        {
+            it->second = index->second;
+            ++it;
+        }
+        else
+            it = objectPacks_.erase(it);
+    relationalPacking_ = std::make_shared<const RelationPacking>(std::move(filtered));
+    SVFUtil::outs() << "AE_BOX_MAY_PACK packs=" << relationalPacking_->size() << '\n';
+    if (std::getenv("SVF_AE_TRACE_ONDEMAND_DEPENDENCIES"))
+    {
+        for (const auto* point : demand.points)
+            std::cerr << "AE_BOX_MAY_POINT " << point->getId() << '\n';
+        for (const auto* transfer : demand.transfers)
+            std::cerr << "AE_BOX_MAY_TRANSFER " << transfer->getEdgeID() << '\n';
+        for (const auto* value : demand.values)
+            std::cerr << "AE_BOX_MAY_VALUE " << value->getId() << '\n';
     }
 }
 
@@ -921,31 +1180,71 @@ void AbstractInterpretation::runOnModule()
     };
     const bool phaseStats = std::getenv("SVF_AE_PHASE_STATS") != nullptr;
     const bool domainStats = std::getenv("SVF_AE_DOMAIN_STATS") != nullptr;
+    const auto cpuSince = [](std::clock_t start)
+    {
+        return double(std::clock() - start) / CLOCKS_PER_SEC;
+    };
     double querySeconds = 0.0;
+    double queryCpu = 0.0;
 
     stat->startClk();
     utils = new AbsExtAPI(this);
     const PhaseClock::time_point queryEnumerationStart = PhaseClock::now();
+    const auto queryEnumerationCpu = std::clock();
     enumerateQueries();
+    if (usesOnDemand() && !prepareBoxMayDemand())
+    {
+        stat->endClk();
+        return;
+    }
     querySeconds += secondsSince(queryEnumerationStart);
+    queryCpu += cpuSince(queryEnumerationCpu);
     /// collect checkpoint
     utils->collectCheckPoint();
 
     const auto packingStart = PhaseClock::now();
+    const auto packingCpu = std::clock();
     initializeRelationalPolicy();
+    const bool duet = relationalPolicy() == DuetPackedRelational;
+    const bool publishedFixed = duet || relationalPolicy() == SpePackedRelational;
+    if (publishedFixed)
+        dumpFixedPacking("AE_POLICY_RAW_PACK");
+    else
+        initializeObjectPacking();
+    const bool lateFieldsUseBox = publishedFixed || !objectPacks_.empty();
+    if (usesOnDemand())
+    {
+        const auto selectionStart = PhaseClock::now();
+        const auto selectionCpu = std::clock();
+        selectBoxMayPacks();
+        SVFUtil::outs() << "AE_BOX_MAY_SELECTION_SECONDS " << secondsSince(selectionStart)
+                       << " cpu_s=" << cpuSince(selectionCpu) << '\n';
+    }
     initializeExecutionPolicy();
+    if (publishedFixed)
+    {
+        dumpFixedPacking("AE_POLICY_EXEC_PACK");
+        SVFUtil::outs() << (duet ? "AE_POLICY_EXEC policy=duet12 solver=pack-ssa"
+                                : "AE_POLICY_EXEC policy=spe17-pack solver=dense")
+                       << " backend=octagon field_fallback=box\n";
+    }
     if (std::getenv("SVF_AE_VERIFY_PACKED_EXECUTOR"))
     {
         const auto probe = makeNumericalDomain(false);
-        if (!dynamic_cast<const SVF::PackedRelationalDomain*>(probe.get()))
-            throw std::logic_error("requested packed executor verification failed");
+        if (!probe->isDomain<SVF::PackedRelationalDomain>())
+        {
+            assert(false && "requested packed executor verification failed");
+            std::abort();
+        }
         SVFUtil::outs() << "AE_PACKING_EXECUTOR packed\n";
     }
-    if (Options::AERelationalPolicy() == SyntaxPackedRelational ||
-            Options::AERelationalPolicy() == ClosurePackedRelational ||
-            Options::AERelationalPolicy() == ImpactPackedRelational ||
-            Options::AERelationalPolicy() == LearnedPackedRelational)
+    if (publishedFixed || relationalPolicy() == SyntaxPackedRelational ||
+            relationalPolicy() == ClosurePackedRelational ||
+            relationalPolicy() == ImpactPackedRelational ||
+            relationalPolicy() == LearnedPackedRelational)
         SVFUtil::outs() << "AE_PACKING_SECONDS " << secondsSince(packingStart) << '\n';
+    if (phaseStats)
+        SVFUtil::outs() << "AE_PACKING_CPU_SECONDS " << cpuSince(packingCpu) << '\n';
     if (std::getenv("SVF_AE_PACK_ONLY"))
     {
         SVFUtil::outs() << "AE_PACK_ONLY complete\n";
@@ -957,16 +1256,17 @@ void AbstractInterpretation::runOnModule()
     if (domainStats)
         SVF::NumericalDomain::beginTelemetry();
     const PhaseClock::time_point solveStart = PhaseClock::now();
+    const auto solveCpuStart = std::clock();
     // Diagnostic for D-005 item 3: objects whose content coordinate is
     // created during the analysis (outside the frozen V).
     const SVF::Variable frozenFrontier = adapter_.syntheticVariable(SVF::NumericType::integer());
-    // Whole Box has no frozen packing vocabulary. Retain upstream's distinct
-    // field objects instead of merging runtime fields into a packing summary.
-    if (Options::AEDomain() != AENumericalDomain::Box)
+    // Published policies leave fields outside the frozen family in Box.
+    if (numericalDomain() != AENumericalDomain::Box && !lateFieldsUseBox)
         adapter_.freezeRuntimeFields();
     analyse();
     const double solveSeconds = secondsSince(solveStart);
-    if (phaseStats && Options::AESparsity() == AbstractInterpretation::Dense)
+    const double solveCpu = cpuSince(solveCpuStart);
+    if (phaseStats && sparsity() == AbstractInterpretation::Dense)
     {
         std::size_t edgeBlocks = 0;
         for (const auto& [block, edgeTransfer] : phiEdgeBlocks_)
@@ -1042,7 +1342,7 @@ void AbstractInterpretation::runOnModule()
                     remaining.erase(variable);
             }
         };
-        for (const auto& [node, property] : stateTrace_)
+        for (const auto& [node, property] : abstractTrace_)
         {
             (void)property;
             measure(state(node));
@@ -1050,7 +1350,7 @@ void AbstractInterpretation::runOnModule()
         if (const SVF::AbstractDomain* carrier = getScalarAbstractState())
             measure(static_cast<const State&>(*carrier));
         SVFUtil::outs()
-                << "AE_DOMAIN_STATS flow_states=" << stateTrace_.size()
+                << "AE_DOMAIN_STATS flow_states=" << abstractTrace_.size()
                 << " active_properties=" << activeProperties
                 << " total_support=" << totalSupport
                 << " max_support=" << maximumSupport
@@ -1064,7 +1364,7 @@ void AbstractInterpretation::runOnModule()
                 << " join_calls=" << operations.joinCalls
                 << " widen_calls=" << operations.wideningCalls
                 << " narrow_calls=" << operations.narrowingCalls << '\n';
-        if (Options::AERelationalPolicy() != WholeRelational)
+        if (relationalPolicy() != WholeRelational)
             SVFUtil::outs()
                     << "AE_PARTIAL_RELATIONAL_STATS inside_ops="
                     << operations.partialInsideOperations
@@ -1089,18 +1389,31 @@ void AbstractInterpretation::runOnModule()
     if (Options::PStat())
         stat->performStat();
     const PhaseClock::time_point queryReportStart = PhaseClock::now();
+    const auto queryReportCpu = std::clock();
     for (auto& detector : detectors)
         detector->reportBug();
     writeQueryLedger();
     querySeconds += secondsSince(queryReportStart);
+    queryCpu += cpuSince(queryReportCpu);
     const PhaseClock::time_point postStart = PhaseClock::now();
+    const auto postCpu = std::clock();
     verifyPostFixpoint();
+    if (usesOnDemand())
+    {
+        const auto relational = readCertifiedQueries(queryLedgerPath(), true);
+        writeBoxMayLedger(&relational);
+        SVFUtil::outs() << "AE_BOX_MAY status=complete\n";
+    }
+    else if (strictQueryCoverage())
+        readCertifiedQueries(queryLedgerPath(), true);
     const double postSeconds = secondsSince(postStart);
     if (phaseStats)
         SVFUtil::outs() << std::defaultfloat << std::setprecision(9)
                         << "AE_PHASE_TIMES ai_s=" << solveSeconds
                         << " query_s=" << querySeconds
-                        << " post_s=" << postSeconds << '\n';
+                        << " post_s=" << postSeconds
+                        << " ai_cpu_s=" << solveCpu << " query_cpu_s=" << queryCpu
+                        << " post_cpu_s=" << cpuSince(postCpu) << '\n';
     // L4 export runs only after every timed phase has been reported, so it
     // cannot change packing, analysis, query or Post timings.
     if (const char* invariantPath = std::getenv("SVF_AE_L4_STATES"))
@@ -1205,8 +1518,8 @@ void AbstractInterpretation::writeInvariantStates(const std::string& path) const
         }
     for (NodeID id : nodes)
     {
-        const auto found = stateTrace_.find(icfg->getICFGNode(id));
-        if (found == stateTrace_.end())
+        const auto found = abstractTrace_.find(icfg->getICFGNode(id));
+        if (found == abstractTrace_.end())
         {
             output << "N\t" << id << "\tmissing\n";
             continue;
@@ -1260,9 +1573,19 @@ void AbstractInterpretation::writeInvariantStates(const std::string& path) const
     }
 }
 
+bool AbstractInterpretation::strictQueryCoverage() const
+{
+    return Options::AEVerifyQueryCoverage() || usesOnDemand();
+}
+
+std::string AbstractInterpretation::queryLedgerPath() const
+{
+    return Options::AEQueryLedgerFile() + (usesOnDemand() ? ".octagon" : "");
+}
+
 bool AbstractInterpretation::queryLedgerEnabled() const
 {
-    return !Options::AEQueryLedgerFile().empty();
+    return !intervalPreanalysis_ && !Options::AEQueryLedgerFile().empty();
 }
 
 void AbstractInterpretation::enumerateQueries()
@@ -1270,8 +1593,10 @@ void AbstractInterpretation::enumerateQueries()
     if (!queryLedgerEnabled())
         return;
     if (Options::AEQueryInputID().empty())
-        throw std::invalid_argument(
-            "-ae-query-input-id is required with -ae-query-ledger");
+    {
+        assert(false && "-ae-query-input-id is required with -ae-query-ledger");
+        std::abort();
+    }
     for (auto& detector : detectors)
         detector->enumerateQueries();
     enumerateStandardAssertionQueries();
@@ -1286,7 +1611,9 @@ bool isStandardAssertionFailure(const CallICFGNode* call)
         return false;
     const std::string name = function->getName();
     return name == "__assert_fail" || name == "__assert_rtn" ||
-           name == "__assert_func" || name == "__assert2";
+           name == "__assert_func" || name == "__assert2" ||
+           (Options::AESVComp() &&
+            (name == "reach_error" || name == "__VERIFIER_error"));
 }
 
 bool isDirectSVFAssertion(const CallICFGNode* call)
@@ -1352,7 +1679,10 @@ void AbstractInterpretation::registerQuery(
     if (!queryLedgerEnabled())
         return;
     if (!node)
-        throw std::invalid_argument("AE query has no ICFG node");
+    {
+        assert(false && "AE query has no ICFG node");
+        std::abort();
+    }
 
     QueryRecord record;
     record.detector = detector;
@@ -1361,12 +1691,17 @@ void AbstractInterpretation::registerQuery(
     record.queryKind = queryKind;
     record.function = node->getFun() ? node->getFun()->getName() : "<global>";
     record.sourceLocation = node->getSourceLoc();
-    record.semanticSite = site ? site->getQuerySite() : "";
+    record.semanticSite = site ? site->getQuerySite()
+                          : "icfg:" + node->getSemanticSite();
     record.statement = site;
-    auto inserted = queryLedger_.emplace(queryKey(detector, node, operand, queryKind, site),
+    auto inserted = queryLedger_.emplace(queryKey(detector, node, queryKind, site),
                                          std::move(record));
-    if (!inserted.second && site && inserted.first->second.statement != site)
-        throw std::invalid_argument("duplicate detector semantic site: " + site->getQuerySite());
+    if (!inserted.second &&
+            (inserted.first->second.statement != site ||
+             inserted.first->second.icfgNode != node->getId() ||
+             inserted.first->second.operand != (operand ? operand->getId() : 0)))
+        throw std::invalid_argument("duplicate detector semantic query: " +
+                                    inserted.first->second.semanticSite + ':' + queryKind);
 }
 
 void AbstractInterpretation::recordQuery(
@@ -1376,9 +1711,12 @@ void AbstractInterpretation::recordQuery(
 {
     if (!queryLedgerEnabled())
         return;
+    const auto key = queryKey(detector, node, queryKind, site);
+    if (strictQueryCoverage() && !queryLedger_.count(key))
+        throw std::runtime_error("observation outside AE query inventory: " + key);
     registerQuery(detector, node, operand, queryKind, site);
-    QueryRecord& record = queryLedger_.at(
-                              queryKey(detector, node, operand, queryKind, site));
+    QueryRecord& record = queryLedger_.at(key);
+    record.observed = true;
     // A Safe query keeps the relational-size tag if any visit needed it.
     const bool keepRelational = outcome == QueryOutcome::Safe &&
                                 record.outcome == QueryOutcome::Safe &&
@@ -1390,15 +1728,18 @@ void AbstractInterpretation::recordQuery(
     }
 }
 
-void AbstractInterpretation::writeQueryLedger() const
+void AbstractInterpretation::writeQueryLedger()
 {
     if (!queryLedgerEnabled())
         return;
-    writeQueryLedgerTo(Options::AEQueryLedgerFile());
+    writeQueryLedgerTo(queryLedgerPath() + ".iterations.tsv");
+    // Iteration history can retain a May from before pointer/size widening.
+    // Report the converged solver states; Post reconstructs them independently.
+    recheckQueriesOnFinalStates(abstractTrace_, queryLedgerPath(), true);
 }
 
 void AbstractInterpretation::recheckQueriesOnFinalStates(
-    Map<const ICFGNode*, State>& finals, const std::string& path)
+    Map<const ICFGNode*, State>& finals, const std::string& path, bool readSolverStates)
 {
     if (!queryLedgerEnabled())
         return;
@@ -1428,7 +1769,7 @@ void AbstractInterpretation::recheckQueriesOnFinalStates(
     {
         return a->getId() < b->getId();
     });
-    recheckStates_ = &finals;
+    recheckStates_ = readSolverStates ? nullptr : &finals;
     // Pass 1 rebuilds detector side tables (gep offsets) from the final
     // states; pass 2 records the outcomes.
     for (int pass = 0; pass < 2; ++pass)
@@ -1437,22 +1778,56 @@ void AbstractInterpretation::recheckQueriesOnFinalStates(
             for (auto& [key, record] : queryLedger_)
             {
                 (void)key;
+                record.observed = false;
                 record.outcome = QueryOutcome::Unreachable;
                 record.reason = "recheck: no Post final state";
             }
         for (const ICFGNode* node : nodes)
         {
-            if (finals.at(node).isBottom())
+            if ((readSolverStates ? state(node) : finals.at(node)).isBottom())
                 continue;
             if (const auto* call = SVFUtil::dyn_cast<CallICFGNode>(node))
                 recordReachedAssertion(call);
             for (auto& detector : fresh)
-                detector->detect(node);
+                if (pass == 0)
+                    detector->prepare(node);
+                else
+                    detector->detect(node);
+            if (readSolverStates)
+                finalizeAbstractState(node);
         }
     }
+    if (strictQueryCoverage())
+        for (const auto& [key, record] : queryLedger_)
+        {
+            const auto* node = icfg->getICFGNode(record.icfgNode);
+            const auto found = finals.find(node);
+            if (!record.observed && found != finals.end() &&
+                    !(readSolverStates ? state(node) : found->second).isBottom())
+                throw std::runtime_error("reachable AE query has no observation: " + key);
+        }
     recheckStates_ = nullptr;
     writeQueryLedgerTo(path);
     queryLedger_ = saved;
+}
+
+static constexpr const char* queryLedgerHeader =
+    "query_id\tinput_id\tdetector\tfunction\tsource_location\t"
+    "icfg_node\toperand\tquery_kind\toutcome\treason\tsemantic_site";
+
+std::vector<std::string> AbstractInterpretation::queryIdentityFields(
+    const QueryRecord& record) const
+{
+    if (record.semanticSite.empty())
+        throw std::logic_error("query ledger lacks semantic identity");
+    const std::string input = escapeQueryField(Options::AEQueryInputID());
+    const std::string detector = queryDetectorName(record.detector);
+    const std::string identity = input + ":v2:" + detector + ':' +
+                                 record.semanticSite + ':' + record.queryKind;
+    return {escapeQueryField(identity), input, detector,
+            escapeQueryField(record.function), escapeQueryField(record.sourceLocation),
+            std::to_string(record.icfgNode), std::to_string(record.operand),
+            escapeQueryField(record.queryKind), escapeQueryField(record.semanticSite)};
 }
 
 void AbstractInterpretation::writeQueryLedgerTo(const std::string& path) const
@@ -1461,9 +1836,7 @@ void AbstractInterpretation::writeQueryLedgerTo(const std::string& path) const
     if (!output)
         throw std::runtime_error("cannot open AE query ledger: " + path);
 
-    output << "query_id\tinput_id\tdetector\tfunction\tsource_location\t"
-              "icfg_node\toperand\tquery_kind\toutcome\treason\tsemantic_site\n";
-    const std::string input = escapeQueryField(Options::AEQueryInputID());
+    output << queryLedgerHeader << '\n';
     std::vector<const QueryRecord*> records;
     records.reserve(queryLedger_.size());
     for (const auto& [key, record] : queryLedger_)
@@ -1471,64 +1844,122 @@ void AbstractInterpretation::writeQueryLedgerTo(const std::string& path) const
         (void)key;
         records.push_back(&record);
     }
-    // SVF NodeIDs are allocation-order diagnostics, not stable program
-    // identities: parsing the same module in two processes can shift all IDs
-    // in one external function.  Order equal semantic sites by their local
-    // ICFG order, then name them by a source/function group occurrence.  The
-    // raw IDs remain in dedicated diagnostic columns.
     std::sort(records.begin(), records.end(),
               [](const QueryRecord* left, const QueryRecord* right)
     {
-        return std::make_tuple(
-                   left->detector, left->function,
-                   left->sourceLocation, left->queryKind,
-                   left->icfgNode, left->operand) <
-               std::make_tuple(
-                   right->detector, right->function,
-                   right->sourceLocation, right->queryKind,
-                   right->icfgNode, right->operand);
+        return std::make_tuple(left->detector, left->semanticSite, left->queryKind) <
+               std::make_tuple(right->detector, right->semanticSite, right->queryKind);
     });
-    std::tuple<AEDetector::DetectorKind, std::string, std::string,
-        std::string> previousGroup;
-    bool first = true;
-    std::size_t occurrence = 0;
-    for (const QueryRecord* recordPointer : records)
+    for (const auto* record : records)
     {
-        const QueryRecord& record = *recordPointer;
-        const auto group = std::make_tuple(record.detector, record.function,
-                                           record.sourceLocation,
-                                           record.queryKind);
-        if (first || group != previousGroup)
-            occurrence = 0;
-        else
-            ++occurrence;
-        previousGroup = group;
-        first = false;
-        const std::string detector = queryDetectorName(record.detector);
-        const std::string identity = !record.semanticSite.empty()
-                                     ? input + ":v2:" + detector + ':' + record.semanticSite + ':' + record.queryKind
-                                     : input + ':' + detector + ':' +
-                                     record.function + ':' + record.sourceLocation + ':' +
-                                     record.queryKind + ':' + std::to_string(occurrence);
-        output << escapeQueryField(identity) << '\t' << input << '\t'
-               << detector << '\t' << escapeQueryField(record.function)
-               << '\t' << escapeQueryField(record.sourceLocation) << '\t'
-               << record.icfgNode << '\t' << record.operand << '\t'
-               << escapeQueryField(record.queryKind) << '\t'
-               << queryOutcomeName(record.outcome) << '\t'
+        const auto fields = queryIdentityFields(*record);
+        for (std::size_t index = 0; index < 8; ++index)
+            output << fields[index] << '\t';
+        output << queryOutcomeName(record->outcome) << '\t'
                << escapeQueryField(
-                   record.outcome == QueryOutcome::Unreachable &&
-                   record.reason.empty()
+                   record->outcome == QueryOutcome::Unreachable &&
+                   record->reason.empty()
                    ? "not reached from configured analysis entries"
-                   : record.reason) << '\t' << escapeQueryField(record.semanticSite) << '\n';
+                   : record->reason) << '\t' << fields.back() << '\n';
     }
+    output.close();
     if (!output)
-        throw std::runtime_error("failed to write AE query ledger: " +
-                                 Options::AEQueryLedgerFile());
+        throw std::runtime_error("failed to write AE query ledger: " + path);
 }
 
-AbstractInterpretation::AbstractInterpretation()
-    : adapter_(*PAG::getPAG()),
+AbstractInterpretation::CertifiedQueries AbstractInterpretation::readCertifiedQueries(
+    const std::string& path, bool sameRun) const
+{
+    std::map<std::string, std::vector<std::string>> expected;
+    for (const auto& [key, record] : queryLedger_)
+    {
+        (void)key;
+        auto fields = queryIdentityFields(record);
+        const auto id = fields.front();
+        if (!expected.emplace(id, std::move(fields)).second)
+            throw std::runtime_error("duplicate exported AE query identity: " + id);
+    }
+    const auto read = [&](const std::string& file)
+    {
+        std::ifstream input(file);
+        const auto invalid = [&file](const std::string& reason)
+        {
+            return std::runtime_error("invalid AE query ledger " + file + ": " + reason);
+        };
+        std::string line;
+        if (!std::getline(input, line) || line != queryLedgerHeader)
+            throw invalid("missing or invalid header");
+        CertifiedQueries result;
+        while (std::getline(input, line))
+        {
+            std::vector<std::string> fields;
+            std::istringstream row(line);
+            std::string field;
+            while (std::getline(row, field, '\t'))
+                fields.push_back(field);
+            if (fields.size() != 11)
+                throw invalid("malformed row");
+            const auto found = expected.find(fields[0]);
+            if (found == expected.end())
+                throw invalid("unexpected query " + fields[0]);
+            const auto& identity = found->second;
+            for (std::size_t index = 1; index < 8; ++index)
+                if ((sameRun || (index != 5 && index != 6)) &&
+                        fields[index] != identity[index])
+                    throw invalid("mismatched query metadata " + fields[0]);
+            if (fields[10] != identity.back() ||
+                    (fields[8] != "Safe" && fields[8] != "May" &&
+                     fields[8] != "Unreachable" && fields[8] != "Unsupported"))
+                throw invalid("invalid site or outcome for " + fields[0]);
+            if (!result.emplace(fields[0], CertifiedQuery{line, fields[8]}).second)
+                throw invalid("duplicate query " + fields[0]);
+        }
+        if (input.bad() || result.size() != expected.size())
+            throw invalid("incomplete query inventory");
+        return result;
+    };
+    const auto ledger = read(path);
+    const auto rechecked = read(path + ".recheck.tsv");
+    for (const auto& [id, query] : ledger)
+        if (query.outcome != rechecked.at(id).outcome)
+            throw std::runtime_error("independent final reevaluation disagrees: " + id);
+    return ledger;
+}
+
+void AbstractInterpretation::writeBoxMayLedger(const CertifiedQueries* relational) const
+{
+    const auto path = Options::AEQueryLedgerFile();
+    const auto staging = path + ".partial";
+    std::ofstream output(staging, std::ios::out | std::ios::trunc);
+    output << queryLedgerHeader << "\torigin\n";
+    for (const auto& [id, box] : boxQueries_)
+    {
+        const bool refined = relational && box.outcome == "May";
+        output << (refined ? relational->at(id).row : box.row)
+               << (refined ? "\tOctagon\n" : "\tBox\n");
+    }
+    output.close();
+    if (!output)
+        throw std::runtime_error("failed to write Box-May ledger: " + staging);
+    std::filesystem::rename(staging, path);
+}
+
+bool AbstractInterpretation::prepareBoxMayDemand()
+{
+    boxQueries_ = readCertifiedQueries(Options::AEQueryLedgerFile() + ".box", false);
+    writeBoxMayLedger(nullptr);
+    const auto may = std::count_if(boxQueries_.begin(), boxQueries_.end(),
+        [](const auto& entry) { return entry.second.outcome == "May"; });
+    if (may)
+        SVFUtil::outs() << "AE_BOX_MAY status=box-certified may=" << may << '\n';
+    else
+        SVFUtil::outs() << "AE_BOX_MAY status=skipped-octagon may=0\n";
+    SVFUtil::outs().flush();
+    return may != 0;
+}
+
+AbstractInterpretation::AbstractInterpretation(bool intervalPreanalysis)
+    : intervalPreanalysis_(intervalPreanalysis), adapter_(*PAG::getPAG()),
       unknownTargetTelemetryEnabled_(
           std::getenv("SVF_AE_UNKNOWN_TARGET_STATS") != nullptr)
 {
@@ -1542,9 +1973,247 @@ AbstractInterpretation::AbstractInterpretation()
     preAnalysis->initWTO();
 }
 
+AbstractInterpretation::AENumericalDomain AbstractInterpretation::numericalDomain() const
+{
+    return intervalPreanalysis_ ? Box : static_cast<AENumericalDomain>(Options::AEDomain());
+}
+
+AbstractInterpretation::AESparsity AbstractInterpretation::sparsity() const
+{
+    return intervalPreanalysis_ ? Dense : static_cast<AESparsity>(Options::AESparsity());
+}
+
+AbstractInterpretation::AERelationalPolicy AbstractInterpretation::relationalPolicy() const
+{
+    return intervalPreanalysis_ ? WholeRelational
+           : static_cast<AERelationalPolicy>(Options::AERelationalPolicy());
+}
+
+bool AbstractInterpretation::packSSAEnabled() const
+{
+    return !intervalPreanalysis_ && usesPackSSA();
+}
+
+std::unique_ptr<AbstractInterpretation> AbstractInterpretation::intervalPreanalysis()
+{
+    std::unique_ptr<AbstractInterpretation> analysis(new AbstractInterpretation(true));
+    analysis->utils = new AbsExtAPI(analysis.get());
+    analysis->stat->startClk();
+    analysis->analyse();
+    analysis->stat->endClk();
+    return analysis;
+}
+
+const AbstractInterpretation::State* AbstractInterpretation::intervalInputState(
+    const ICFGNode* node) const
+{
+    const auto found = intervalInputs_.find(node);
+    return hasAbsState(node) && found != intervalInputs_.end() && !found->second.isBottom()
+           ? &found->second : nullptr;
+}
+
+const AbstractInterpretation::State* AbstractInterpretation::intervalInputState(
+    const SVFStmt* statement) const
+{
+    const auto found = intervalStatementInputs_.find(statement);
+    return hasAbsState(statement->getICFGNode()) &&
+           found != intervalStatementInputs_.end() && !found->second.isBottom()
+           ? &found->second : nullptr;
+}
+
+SVF::Variable AbstractInterpretation::intervalOffsetVariable(const SVFVar* variable) const
+{
+    const auto found = intervalOffsets_.find(variable->getId());
+    if (found != intervalOffsets_.end())
+        return found->second;
+    const auto symbol = adapter_.syntheticVariable(SVF::NumericType::integer());
+    intervalOffsets_.emplace(variable->getId(), symbol);
+    return symbol;
+}
+
+SVF::Interval AbstractInterpretation::intervalPointerOffset(
+    const SVFVar* variable, const State& state) const
+{
+    const auto found = intervalOffsets_.find(variable->getId());
+    if (found == intervalOffsets_.end())
+        return SVF::Interval::top();
+    const auto result = state.interval(found->second);
+    return result.isBottom() ? SVF::Interval::top() : result;
+}
+
+void AbstractInterpretation::updateIntervalPointerOffsets(
+    const SVFStmt* statement, const State& before)
+{
+    const auto* node = statement->getICFGNode();
+    State& after = ensureState(node);
+    if (after.isBottom())
+        return;
+    const auto pointer = [](const SVFVar* variable)
+    {
+        const auto* returned = SVFUtil::dyn_cast<RetValPN>(variable);
+        return returned ? returned->getFunction()->getReturnType()->isPointerTy()
+                        : variable->isPointer();
+    };
+    const auto assign = [&](const SVFVar* variable, const SVF::Interval& offset)
+    {
+        after.setInterval(intervalOffsetVariable(variable), offset);
+    };
+    const auto range = [&](const SVFVar* rawValue)
+    {
+        const auto* value = SVFUtil::dyn_cast<ValVar>(rawValue);
+        if (!value)
+            return SVF::Interval::top();
+        if (const auto* constant = SVFUtil::dyn_cast<ConstIntValVar>(value))
+            return SVF::Interval::singleton(SVF::Rational(constant->getSExtValue()));
+        if (!adapter_.contains(*value))
+            return SVF::Interval::top();
+        const auto interval = before.interval(adapter_.variable(*value));
+        return interval.isBottom() ? SVF::Interval::top() : interval;
+    };
+    if (const auto* address = SVFUtil::dyn_cast<AddrStmt>(statement))
+        assign(address->getLHSVar(), SVF::Interval::singleton(SVF::Rational(0)));
+    else if (const auto* copy = SVFUtil::dyn_cast<CopyStmt>(statement))
+    {
+        if (pointer(copy->getLHSVar()) || pointer(copy->getRHSVar()))
+            assign(copy->getLHSVar(), intervalPointerOffset(copy->getRHSVar(), before));
+    }
+    else if (const auto* gep = SVFUtil::dyn_cast<GepStmt>(statement))
+    {
+        // External-API field edges carry flattened indices without byte types.
+        const auto offsets = gep->getOffsetVarAndGepTypePairVec();
+        if (std::any_of(offsets.begin(), offsets.end(),
+                        [](const auto& part) { return !part.second; }))
+        {
+            assign(gep->getLHSVar(), SVF::Interval::top());
+            return;
+        }
+        SVF::Interval delta = SVF::Interval::singleton(SVF::Rational(0));
+        if (gep->isConstantOffset())
+            delta = SVF::Interval::singleton(SVF::Rational(gep->accumulateConstantByteOffset()));
+        else for (const auto& part : offsets)
+        {
+            if (const auto* structure = SVFUtil::dyn_cast<SVFStructType>(part.second))
+                delta = SVF::add(delta, SVF::Interval::singleton(SVF::Rational(
+                    gep->getAccessPath().getStructFieldOffset(part.first, structure))));
+            else if (SVFUtil::isa<SVFArrayType>(part.second) ||
+                     SVFUtil::isa<SVFPointerType>(part.second))
+            {
+                const auto* array = SVFUtil::dyn_cast<SVFArrayType>(part.second);
+                const auto width = array ? array->getTypeOfElement()->getByteSize()
+                    : gep->getAccessPath().gepSrcPointeeType()->getByteSize();
+                delta = SVF::add(delta, SVF::multiply(range(part.first),
+                    SVF::Interval::singleton(SVF::Rational(width))));
+            }
+            else delta = SVF::Interval::top();
+        }
+        assign(gep->getLHSVar(), SVF::add(intervalPointerOffset(gep->getRHSVar(), before), delta));
+    }
+    else if (const auto* load = SVFUtil::dyn_cast<LoadStmt>(statement))
+    {
+        if (!pointer(load->getLHSVar()))
+            return;
+        const auto addresses = before.addressSet(adapter_.variable(*load->getRHSVar()));
+        SVF::Interval result = SVF::Interval::bottom();
+        if (addresses.isFinite())
+            for (const auto location : addresses.locations())
+            {
+                const auto* object = objectAt(location);
+                result.joinWith(object ? intervalPointerOffset(object, before) : SVF::Interval::top());
+            }
+        assign(load->getLHSVar(), result.isBottom() ? SVF::Interval::top() : result);
+    }
+    else if (const auto* store = SVFUtil::dyn_cast<StoreStmt>(statement))
+    {
+        const auto addresses = before.addressSet(adapter_.variable(*store->getLHSVar()));
+        if (!addresses.isFinite())
+        {
+            std::vector<SVF::Variable> forgotten;
+            for (const auto& entry : intervalOffsets_)
+                if (SVFUtil::isa<ObjVar>(svfir->getSVFVar(entry.first)))
+                    forgotten.push_back(entry.second);
+            for (const auto symbol : forgotten)
+                after.setInterval(symbol, SVF::Interval::top());
+            return;
+        }
+        for (const auto location : addresses.locations())
+        {
+            const auto* object = objectAt(location);
+            if (!object || !pointer(object))
+                continue;
+            auto result = intervalPointerOffset(store->getRHSVar(), before);
+            if (!canStrongStore(addresses, *object, before))
+                result.joinWith(intervalPointerOffset(object, before));
+            assign(object, result);
+        }
+    }
+    else if (const auto* select = SVFUtil::dyn_cast<SelectStmt>(statement))
+    {
+        if (!pointer(select->getRes()))
+            return;
+        const auto condition = range(select->getCondition());
+        const auto yes = intervalPointerOffset(select->getTrueValue(), before);
+        const auto no = intervalPointerOffset(select->getFalseValue(), before);
+        auto result = condition.isSingleton() ? (condition.isZero() ? no : yes) : yes;
+        if (!condition.isSingleton())
+            result.joinWith(no);
+        assign(select->getRes(), result);
+    }
+    else if (const auto* phi = SVFUtil::dyn_cast<PhiStmt>(statement))
+    {
+        if (!pointer(phi->getRes()) || phiEdgeBlock(node->getBB()))
+            return;
+        SVF::Interval result = SVF::Interval::bottom();
+        for (u32_t i = 0; i < phi->getOpVarNum(); ++i)
+        {
+            const auto* from = phi->getOpICFGNode(i);
+            if (!hasAbsState(from))
+                continue;
+            const auto* edge = icfg->getICFGEdge(from, node, ICFGEdge::IntraCF);
+            if (const auto* branch = edge ? SVFUtil::dyn_cast<IntraCFGEdge>(edge) : nullptr)
+                if (branch->getCondition() && !isBranchEdgeFeasibleAt(branch, from))
+                    continue;
+            result.joinWith(intervalPointerOffset(phi->getOpVar(i), state(from)));
+        }
+        assign(phi->getRes(), result.isBottom() ? SVF::Interval::top() : result);
+    }
+    else if (const auto* call = SVFUtil::dyn_cast<CallPE>(statement))
+    {
+        if (!pointer(call->getRes()))
+            return;
+        SVF::Interval result = SVF::Interval::bottom();
+        for (u32_t i = 0; i < call->getOpVarNum(); ++i)
+        {
+            const auto* from = call->getOpCallICFGNode(i);
+            if (hasAbsState(from))
+                result.joinWith(intervalPointerOffset(call->getOpVar(i), state(from)));
+        }
+        assign(call->getRes(), result.isBottom() ? SVF::Interval::top() : result);
+    }
+    else if (const auto* ret = SVFUtil::dyn_cast<RetPE>(statement))
+    {
+        if (pointer(ret->getLHSVar()))
+            assign(ret->getLHSVar(), intervalPointerOffset(ret->getRHSVar(), before));
+    }
+}
+
 /// Factory: first call allocates the concrete subclass based on
-/// Options::AESparsity(); all subsequent calls return the same instance.
+/// sparsity(); all subsequent calls return the same instance.
 /// Must only be called after the option parser has populated AESparsity.
+bool AbstractInterpretation::usesOnDemand()
+{
+    return Options::AEOnDemand() || Options::AEClosureBoxMay();
+}
+
+bool AbstractInterpretation::usesPackSSA()
+{
+    return Options::AESparsity() == OhPackedSparse ||
+           (Options::AESparsity() == Sparse && Options::AEDomain() == Octagon &&
+            (Options::AERelationalPolicy() == SyntaxPackedRelational ||
+             Options::AERelationalPolicy() == ClosurePackedRelational ||
+             Options::AERelationalPolicy() == ImpactPackedRelational ||
+             Options::AERelationalPolicy() == DuetPackedRelational));
+}
+
 AbstractInterpretation& AbstractInterpretation::getAEInstance()
 {
     // Keep the singleton alive until process exit. Several owned analysis
@@ -1553,29 +2222,38 @@ AbstractInterpretation& AbstractInterpretation::getAEInstance()
     static AbstractInterpretation* instance = []() -> AbstractInterpretation*
     {
         if (Options::AESparsity() == AESparsity::Sparse &&
-                Options::AEDomain() != AENumericalDomain::Box)
-            throw std::invalid_argument(
-                "relational numerical domains currently support dense and "
-                "semi-sparse AE only");
+                Options::AEDomain() != AENumericalDomain::Box && !usesPackSSA())
+            throw std::invalid_argument("relational sparse AE requires native Octagon packing");
         if (Options::AESparsity() == AESparsity::VersionedSparse &&
                 (Options::AEDomain() == AENumericalDomain::Box ||
                  (Options::AERelationalPolicy() != WholeRelational &&
                   Options::AERelationalPolicy() != SyntaxPackedRelational)))
-            throw std::invalid_argument(
-                "-ae-sparsity=d3 requires a relational domain with "
-                "-ae-relational-policy=whole or syntax-pack");
+        {
+            assert(false && "-ae-sparsity=d3 requires a relational domain with " "-ae-relational-policy=whole or syntax-pack");
+            std::abort();
+        }
         if (Options::AERelationalPolicy() != WholeRelational &&
                 Options::AEDomain() == AENumericalDomain::Box)
-            throw std::invalid_argument(
-                "partial relational policies require octagon or polyhedra");
+        {
+            assert(false && "partial relational policies require octagon or polyhedra");
+            std::abort();
+        }
+        if (usesPackSSA())
+        {
+            if (Options::AEDomain() != Octagon ||
+                    (Options::AERelationalPolicy() != SyntaxPackedRelational &&
+                     Options::AERelationalPolicy() != ClosurePackedRelational &&
+                     Options::AERelationalPolicy() != ImpactPackedRelational &&
+                     Options::AERelationalPolicy() != DuetPackedRelational) ||
+                    Options::AEPostCheckFile().empty())
+            {
+                assert(false && "oh-packed requires native octagon, syntax/closure/impact packs, Post checking");
+                std::abort();
+            }
+            return new OhPackedAbstractInterpretation();
+        }
         switch (Options::AESparsity())
         {
-        case AESparsity::OhPackedSparse:
-            if (Options::AEDomain() != Octagon ||
-                    Options::AERelationalPolicy() != SyntaxPackedRelational ||
-                    Options::AEPostCheckFile().empty())
-                throw std::invalid_argument("oh-packed requires native octagon, syntax-pack, Post checking");
-            return new OhPackedAbstractInterpretation();
         case AESparsity::SemiSparse:
             return new SemiSparseAbstractInterpretation();
         case AESparsity::Sparse:
@@ -1686,6 +2364,64 @@ void AbstractInterpretation::analyse()
     analyzeFromAllProgEntries();
 }
 
+void AbstractInterpretation::initializeRootArguments(
+    const FunEntryICFGNode* entry, const ICFGNode* node)
+{
+    for (const SVFVar* argument : entry->getFormalParms())
+    {
+        if (argument->getType()->isPointerTy())
+            updateAddressSet(argument, blackHoleAddressSet(), node);
+        else
+            updateInterval(argument, unknownInterval(argument), node);
+    }
+    const auto main = AllocationSizeModel::mainArguments(*svfir);
+    if (!main || main->entry != entry)
+        return;
+    if (!main->vector || !main->strings)
+        throw std::logic_error("main environment objects were not prepared");
+    auto count = utils->getRangeLimitFromType(main->argc->getType());
+    count.meetWith(SVF::Interval(SVF::Bound::finite(SVF::Rational(0)),
+                                 SVF::Bound::plusInfinity()));
+    updateInterval(main->argc, count, node);
+    updateAddressSet(main->argv,
+                     SVF::AddressSet::singleton(adapter_.location(*main->vector)), node);
+    auto contents = SVF::AddressSet::singleton(adapter_.location(*main->strings));
+    contents.joinWith(SVF::AddressSet::singleton(SVF::Location::null()));
+    updateValue(main->vector, SVF::Interval::bottom(), contents, node);
+    updateValue(main->strings, utils->getRangeLimitFromType(main->strings->getType()),
+                SVF::AddressSet::bottom(), node);
+    State& initial = ensureState(node);
+    initial.assignNumeric(adapter_.sizeVariable(*main->vector),
+                          SVF::LinearExpression(adapter_.variable(*main->argc)) +
+                          SVF::LinearExpression(SVF::Rational(1)));
+    assignInterval(initial, adapter_.sizeVariable(*main->strings),
+                   SVF::Interval(SVF::Bound::finite(SVF::Rational(1)),
+                                 SVF::Bound::plusInfinity()));
+    if (intervalPreanalysis_)
+    {
+        const auto zero = SVF::Interval::singleton(SVF::Rational(0));
+        initial.setInterval(intervalOffsetVariable(main->argv), zero);
+        initial.setInterval(intervalOffsetVariable(main->vector), zero);
+        // Sparrow's library prefix supplies prediction facts, not main facts.
+        for (auto it = svfir->begin(); it != svfir->end(); ++it)
+            if (const auto* object = SVFUtil::dyn_cast<GlobalObjVar>(it->second);
+                    object && ImpactRelationPacking::isExternalObject(object->getId()))
+            {
+                if (object->getName() == "optarg" && object->isPointer())
+                {
+                    updateValue(object, SVF::Interval::bottom(),
+                                SVF::AddressSet::singleton(adapter_.location(*main->strings)), node);
+                    initial.setInterval(intervalOffsetVariable(object), zero);
+                }
+                else if (object->getName() == "optind" &&
+                         SVFUtil::isa<SVFIntegerType>(object->getType()))
+                    updateInterval(object,
+                                   SVF::Interval(SVF::Bound::finite(SVF::Rational(0)),
+                                                 SVF::Bound::plusInfinity()), node);
+            }
+    }
+}
+
 /// Analyze the entry functions selected by collectProgEntryFuns().
 /// Abstract state is shared across entry points so that functions analyzed from
 /// earlier entries are not re-analyzed from scratch.
@@ -1709,25 +2445,16 @@ void AbstractInterpretation::analyzeFromAllProgEntries()
         // Selected roots have no caller transfer to define their arguments.
         // Inputs are unknown values, unlike uninitialized object contents.
         // Match upstream's type-directed policy for external pointer inputs.
-        for (const SVFVar* argument : funEntry->getFormalParms())
-        {
-            if (argument->getType()->isPointerTy())
-                updateAddressSet(argument, blackHoleAddressSet(), globalNode);
-            else
-                updateInterval(argument, unknownInterval(argument), globalNode);
-        }
+        initializeRootArguments(funEntry, globalNode);
         copyAbstractState(globalNode, funEntry);
         // A later call site can enlarge a context-insensitive callee summary.
         // Revisit the root until every caller and its downstream states cover
         // that enlarged summary.  Loop/recursion WTO handling remains
         // responsible for convergence; an arbitrary iteration cap would not
         // establish a post-fixpoint.
-        if (Options::AEDomain() == AENumericalDomain::Box)
-            handleFunction(funEntry, nullptr);
-        else
-            while (handleFunction(funEntry, nullptr))
-            {
-            }
+        summaryIteration_ = 0;
+        while (handleFunction(funEntry, nullptr))
+            ++summaryIteration_;
     }
 }
 
@@ -1762,30 +2489,6 @@ static const LoadStmt* findBackingLoad(const SVFVar* var)
             return SVFUtil::dyn_cast<LoadStmt>(*src->getInEdges().begin());
     }
     return nullptr;
-}
-
-// Sufficient freshness proof, deliberately alias-independent: the load and
-// branch are on one acyclic, unconditional, intra-block predecessor chain,
-// with no intervening store or call. An SSA load result survives a write;
-// the mutable object's content does not. Check through the branch (not merely
-// through the comparison), because a write may also occur after the compare.
-static bool loadedMemoryStillCurrent(const LoadStmt* load, const ICFGNode* branch)
-{
-    const ICFGNode* origin=load->getICFGNode();
-    if (!origin->getBB() || origin->getBB()!=branch->getBB()) return false;
-    std::set<const ICFGNode*> seen;
-    for (const ICFGNode* cursor=branch;;)
-    {
-        if (!seen.insert(cursor).second || !SVFUtil::isa<IntraICFGNode>(cursor) ||
-                cursor->getBB()!=origin->getBB()) return false;
-        for (const SVFStmt* stmt:cursor->getSVFStmts())
-            if (SVFUtil::isa<StoreStmt>(stmt)) return false;
-        if (cursor==origin) return true;
-        if (cursor->getInEdges().size()!=1) return false;
-        const auto* edge=SVFUtil::dyn_cast<IntraCFGEdge>(*cursor->getInEdges().begin());
-        if (!edge || edge->getCondition()) return false;
-        cursor=edge->getSrcNode();
-    }
 }
 
 /// Compute the interval constraint on one cmp operand given the predicate,
@@ -1940,6 +2643,142 @@ static SVF::Interval computeCmpConstraint(s32_t predicate, s64_t succ,
     return result;
 }
 
+bool AbstractInterpretation::isSwitchDefaultEdge(const IntraCFGEdge* edge) const
+{
+    const auto* branch = SVFUtil::cast<BranchStmt>(
+                             edge->getSrcNode()->getSVFStmts().back());
+    return branch->getSuccessor(0) == edge->getDstNode();
+}
+
+bool AbstractInterpretation::isSwitchBranchEdgeFeasible(
+    const IntraCFGEdge* edge, const SVF::Interval& input) const
+{
+    if (input.isBottom())
+        return false;
+    if (edge->getCondition()->getType()->getByteSize() > sizeof(s64_t))
+        return true;
+    const auto* branch = SVFUtil::cast<BranchStmt>(
+                             edge->getSrcNode()->getSVFStmts().back());
+    u64_t matchedCases = 0;
+    for (u32_t i = 1; i < branch->getNumSuccessors(); ++i)
+    {
+        const SVF::Rational value(branch->getSuccessorCondValue(i));
+        if (input.contains(value))
+        {
+            if (branch->getSuccessor(i) == edge->getDstNode())
+                return true;
+            ++matchedCases;
+        }
+    }
+    if (!isSwitchDefaultEdge(edge))
+        return false;
+    if (!input.lower().isFinite() || !input.upper().isFinite())
+        return true;
+    const SVF::Rational span = input.upper().value() - input.lower().value();
+    return span >= SVF::Rational(static_cast<s64_t>(matchedCases));
+}
+
+void AbstractInterpretation::collectSwitchRefinement(
+    const IntraCFGEdge* edge, SVF::AbstractDomain& state)
+{
+    if (isSwitchDefaultEdge(edge))
+        return;
+    const auto* branch = SVFUtil::cast<BranchStmt>(
+                             edge->getSrcNode()->getSVFStmts().back());
+    u32_t caseCount = 0;
+    s64_t caseValue = 0;
+    for (u32_t i = 1; i < branch->getNumSuccessors(); ++i)
+        if (branch->getSuccessor(i) == edge->getDstNode())
+        {
+            ++caseCount;
+            caseValue = branch->getSuccessorCondValue(i);
+        }
+    if (caseCount != 1)
+        return;
+    const LoadStmt* load = findBackingLoad(edge->getCondition());
+    if (!load)
+        return;
+    const SVF::AddressSet targets = getAddressSet(load->getRHSVar(), load->getICFGNode());
+    if (!targets.isSingleton() || targets.hasUnknownObject())
+        return;
+    const ObjVar* object = objectAt(*targets.begin());
+    if (object && object->getId() != IRGraph::NullPtr && object->getId() != IRGraph::BlackHole)
+        recordBranchRefinement(object->getId(),
+                               SVF::Interval::singleton(SVF::Rational(caseValue)), state,
+                               load->getICFGNode(), edge->getDstNode());
+}
+
+std::set<SVF::Variable> AbstractInterpretation::branchWrites(const IntraCFGEdge* edge) const
+{
+    std::set<SVF::Variable> writes;
+    const SVFVar* condition = edge->getCondition();
+    if (!condition)
+        return writes;
+    if (!edge->isSwitchEdge())
+        collectConditionWrites(condition, edge->getSuccessorCondValue() != 0,
+                               edge->getSrcNode(), writes);
+    else if ((intervalPreanalysis_ || numericalDomain() != AENumericalDomain::Box) &&
+             edge->getSwitchWidth() >= 32 && edge->getSwitchWidth() <= 64)
+    {
+        const auto* value = SVFUtil::dyn_cast<ValVar>(condition);
+        if (value && adapter_.contains(*value))
+            writes.insert(adapter_.variable(*value));
+    }
+
+    if (condition->getInEdges().empty())
+        return writes;
+    const auto* comparison = edge->isSwitchEdge() ? nullptr
+        : SVFUtil::dyn_cast<CmpStmt>(*condition->getInEdges().begin());
+    std::vector<const LoadStmt*> loads;
+    if (comparison)
+    {
+        const s32_t predicate = comparison->getPredicate();
+        if (predicate != CmpStmt::ICMP_EQ && predicate != CmpStmt::ICMP_NE &&
+                predicate != CmpStmt::ICMP_SLT && predicate != CmpStmt::ICMP_SLE &&
+                predicate != CmpStmt::ICMP_SGT && predicate != CmpStmt::ICMP_SGE)
+            return writes;
+        if (comparison->getOpVarID(0) == IRGraph::NullPtr ||
+                comparison->getOpVarID(1) == IRGraph::NullPtr)
+            return writes;
+        for (const auto* operand : comparison->getOpndVars())
+            if (const auto* load = findBackingLoad(operand))
+                loads.push_back(load);
+    }
+    else
+    {
+        if (edge->isSwitchEdge() && (edge->includesSwitchDefault() ||
+                edge->getSwitchWidth() < 32 || edge->getSwitchWidth() > 64 ||
+                edge->getSwitchCases().empty()))
+            return writes;
+        for (const auto* definition : condition->getInEdges())
+            if (const auto* load = SVFUtil::dyn_cast<LoadStmt>(definition))
+                loads.push_back(load);
+    }
+    for (const auto* load : loads)
+    {
+        if (!SVFIRAdapter::loadedMemoryStillCurrent(load, edge->getSrcNode()))
+            continue;
+        const auto& targets = preAnalysis->getPointerAnalysis()->getPts(load->getRHSVarID());
+        bool unknown = targets.empty();
+        for (NodeID id : targets)
+        {
+            const auto* object = SVFUtil::dyn_cast<ObjVar>(svfir->getGNode(id));
+            unknown |= !object || id == IRGraph::BlackHole;
+            if (object && !object->isPointer())
+                writes.insert(adapter_.contentVariable(*object));
+        }
+        // Runtime addresses may be more precise than an unknown static target.
+        // Cover numerical object owners without redefining unrelated scalars.
+        if (unknown)
+            for (const auto& pack : *relationalPacking_)
+                for (const auto variable : pack)
+                    if (const auto* object = adapter_.contentObject(variable))
+                        if (!object->isPointer())
+                            writes.insert(variable);
+    }
+    return writes;
+}
+
 void AbstractInterpretation::collectBranchRefinement(
     const IntraCFGEdge* edge, SVF::AbstractDomain& state)
 {
@@ -1957,6 +2796,11 @@ void AbstractInterpretation::collectBranchRefinement(
     const SVFStmt* condDef = *cond->getInEdges().begin();
 
     const CmpStmt* cmpStmt = edge->isSwitchEdge() ? nullptr : SVFUtil::dyn_cast<CmpStmt>(condDef);
+    if (!cmpStmt && numericalDomain() == AENumericalDomain::Box)
+    {
+        collectSwitchRefinement(edge, state);
+        return;
+    }
     if (cmpStmt)
     {
         s32_t predicate = cmpStmt->getPredicate();
@@ -1964,7 +2808,7 @@ void AbstractInterpretation::collectBranchRefinement(
                                        predicate == CmpStmt::ICMP_ULE ||
                                        predicate == CmpStmt::ICMP_UGT ||
                                        predicate == CmpStmt::ICMP_UGE;
-        if (!(Options::AEDomain() == Box && unsignedPredicate) &&
+        if (!(numericalDomain() == Box && unsignedPredicate) &&
                 predicate!=CmpStmt::ICMP_EQ && predicate!=CmpStmt::ICMP_NE &&
                 predicate!=CmpStmt::ICMP_SLT && predicate!=CmpStmt::ICMP_SLE &&
                 predicate!=CmpStmt::ICMP_SGT && predicate!=CmpStmt::ICMP_SGE)
@@ -2014,7 +2858,7 @@ void AbstractInterpretation::collectBranchRefinement(
                         // Match Original: refine a loaded value only against
                         // a fixed numerical bound, not another interval.
                     }
-                    else if (!load || !loadedMemoryStillCurrent(load,pred))
+                    else if (!load || !SVFIRAdapter::loadedMemoryStillCurrent(load,pred))
                     {
                         // Example: cmp uses a computed temporary, not load p.
                     }
@@ -2084,7 +2928,7 @@ void AbstractInterpretation::collectBranchRefinement(
             {
                 const SVFStmt* stmt = stmtList.pop();
                 const LoadStmt* load = SVFUtil::dyn_cast<LoadStmt>(stmt);
-                if (!load || !loadedMemoryStillCurrent(load,pred))
+                if (!load || !SVFIRAdapter::loadedMemoryStillCurrent(load,pred))
                 {
                     // Skip non-load definitions of the switch condition.
                 }
@@ -2146,10 +2990,8 @@ void AbstractInterpretation::recordBranchRefinement(
  * Handle an ICFG node: execute statements on the current abstract state.
  * The node's pre-state must already be installed by
  * mergeStatesFromPredecessors, or by handleGlobalNode for the global node.
- * Returns true if the abstract state has changed, false if fixpoint reached or
- * unreachable.
  */
-bool AbstractInterpretation::handleICFGNode(const ICFGNode* node)
+void AbstractInterpretation::handleICFGNode(const ICFGNode* node)
 {
     // Check reachability: pre-state must have been propagated by predecessors
     bool isFunEntry = SVFUtil::isa<FunEntryICFGNode>(node);
@@ -2170,14 +3012,13 @@ bool AbstractInterpretation::handleICFGNode(const ICFGNode* node)
         }
         else
         {
-            return false; // unreachable node
+            return; // unreachable node
         }
     }
 
     beginAbstractState(node);
-    // Store the previous state for fixpoint detection
-    std::unique_ptr<SVF::AbstractDomain> previousState =
-        cloneAbstractState(node);
+    if (intervalPreanalysis_)
+        intervalInputs_.insert_or_assign(node, state(node));
 
     stat->getBlockTrace()++;
     stat->getICFGNodeTrace()++;
@@ -2222,11 +3063,6 @@ bool AbstractInterpretation::handleICFGNode(const ICFGNode* node)
     // Track this node as analyzed (for coverage statistics across all entry
     // points)
     allAnalyzedNodes.insert(node);
-
-    if (isAbstractStateEquivalent(node, *previousState))
-        return false;
-
-    return true;
 }
 
 /**
@@ -2251,6 +3087,19 @@ bool AbstractInterpretation::handleFunction(const ICFGNode* funEntry,
             before.emplace(node, state(node));
     }
 
+    const bool sparseBox = numericalDomain() == AENumericalDomain::Box &&
+                           sparsity() != Dense;
+    auto scalarSummary = caller ? nullptr : cloneScalarSummary();
+    std::optional<State> previousEntry;
+    if (sparseBox && caller && hasAbsState(funEntry))
+    {
+        previousEntry = state(funEntry);
+        for (const SVFVar* formal :
+                SVFUtil::cast<FunEntryICFGNode>(funEntry)->getFormalParms())
+            materializeValue(*previousEntry,
+                             SVFUtil::cast<ValVar>(formal), funEntry);
+    }
+
     // Push all top-level WTO components into the worklist in WTO order
     FIFOWorkList<const ICFGWTOComp*> worklist(it->second->getWTOComponents());
 
@@ -2263,7 +3112,40 @@ bool AbstractInterpretation::handleFunction(const ICFGNode* funEntry,
         {
             const ICFGNode* node = singleton->getICFGNode();
             if (mergeStatesFromPredecessors(node))
+            {
                 handleICFGNode(node);
+                const auto previous = before.find(node);
+                if (node == funEntry && caller && previous != before.end() &&
+                        (sparsity() == Dense || packSSAEnabled() || sparseBox) &&
+                        summaryIteration_ >= Options::WidenDelay())
+                {
+                    // Shared summaries can create cycles even without a
+                    // recursive source call. Widen their entry equations.
+                    State current = state(node);
+                    const auto& formals =
+                        SVFUtil::cast<FunEntryICFGNode>(node)->getFormalParms();
+                    if (sparseBox)
+                        for (const SVFVar* formal : formals)
+                            materializeValue(current,
+                                             SVFUtil::cast<ValVar>(formal), node);
+                    State widened = previousEntry ? *previousEntry
+                                    : previous->second;
+                    widened.widenWith(current);
+                    ensureState(node) = widened;
+                    if (sparseBox)
+                        for (const SVFVar* parameter : formals)
+                        {
+                            const auto* formal = SVFUtil::cast<ValVar>(parameter);
+                            if (adapter_.contains(*formal))
+                            {
+                                const auto variable = adapter_.variable(*formal);
+                                updateValue(formal, widened.interval(variable),
+                                            widened.addressSet(variable), node);
+                            }
+                        }
+                    finalizeAbstractState(node);
+                }
+            }
         }
         else if (const ICFGCycleWTO* cycle =
                      SVFUtil::dyn_cast<ICFGCycleWTO>(comp))
@@ -2281,6 +3163,13 @@ bool AbstractInterpretation::handleFunction(const ICFGNode* funEntry,
         const auto previous = before.find(node);
         if (previous == before.end() ||
                 state(node).isEquivalentTo(previous->second) !=
+                SVF::CheckResult::True)
+            return true;
+    }
+    if (scalarSummary)
+    {
+        const auto current = cloneScalarSummary();
+        if (!current || current->isEquivalentTo(*scalarSummary) !=
                 SVF::CheckResult::True)
             return true;
     }
@@ -2316,6 +3205,8 @@ void AbstractInterpretation::refreshSiblingReturnSites(
         copyAbstractState(call, returnSite);
         if (mergeStatesFromPredecessors(returnSite))
             handleICFGNode(returnSite);
+        else
+            abstractTrace_.erase(returnSite);
     }
 }
 
@@ -2345,6 +3236,25 @@ bool AbstractInterpretation::isExtCall(const CallICFGNode* callNode)
 void AbstractInterpretation::handleExtCall(const CallICFGNode* callNode)
 {
     utils->handleExtAPI(callNode);
+    if (intervalPreanalysis_)
+    {
+        const auto* returnSite = callNode->getRetICFGNode();
+        const auto* result = returnSite ? returnSite->getActualRet() : nullptr;
+        if (result && result->isPointer())
+        {
+            SVF::Interval offset = SVF::Interval::top();
+            for (const auto& size : allocationSizeModel().all())
+                if (size.site && AllocationSizeModel::allocationCall(size.site) == callNode)
+                    offset = SVF::Interval::singleton(SVF::Rational(0));
+            const auto* function = callNode->getCalledFunction();
+            const std::string name = function ? function->getName() : "";
+            if (callNode->arg_size() && (name == "memcpy" || name == "memmove" ||
+                    name == "memset" || name == "strcpy" || name == "strncpy" ||
+                    name == "strcat" || name == "strncat"))
+                offset = intervalPointerOffset(callNode->getArgument(0), state(callNode));
+            ensureState(callNode).setInterval(intervalOffsetVariable(result), offset);
+        }
+    }
     // Keep the external model's result, including an initialized Top. The
     // initialization guard carries that definition without an artificial range.
     for (auto& detector : detectors)
@@ -2388,8 +3298,10 @@ void AbstractInterpretation::handleFunCall(const CallICFGNode* callNode)
     // A mixed indirect target set needs a per-target summary/return join;
     // until that is implemented, do not silently use the direct-call rule.
     if (!callNode->getCalledFunction() && recursiveTopSummary(callNode))
-        throw std::runtime_error(
-            "AE_RECURSIVE_TOP_FAIL_CLOSED: indirect recursive target");
+    {
+        assert(false && "AE_RECURSIVE_TOP_FAIL_CLOSED: indirect recursive target");
+        std::abort();
+    }
     if (skipRecursiveCall(callNode))
         return;
 
@@ -2407,6 +3319,8 @@ void AbstractInterpretation::handleFunCall(const CallICFGNode* callNode)
         // same whole-function pass.
         if (mergeStatesFromPredecessors(retNode))
             handleICFGNode(retNode);
+        else
+            abstractTrace_.erase(retNode);
         refreshSiblingReturnSites(callee, retNode);
         return;
     }
@@ -2446,8 +3360,13 @@ void AbstractInterpretation::handleFunCall(const CallICFGNode* callNode)
     }
     // Resume return node from caller's state (context-insensitive)
     copyAbstractState(callNode, retNode);
-    if (analyzedCallee && mergeStatesFromPredecessors(retNode))
-        handleICFGNode(retNode);
+    if (analyzedCallee)
+    {
+        if (mergeStatesFromPredecessors(retNode))
+            handleICFGNode(retNode);
+        else
+            abstractTrace_.erase(retNode);
+    }
     for (const FunObjVar* callee : analyzedCallees)
         refreshSiblingReturnSites(callee, retNode);
 }
@@ -2455,13 +3374,16 @@ void AbstractInterpretation::handleFunCall(const CallICFGNode* callNode)
 bool AbstractInterpretation::mergeStatesFromPredecessors(
     const ICFGNode* node)
 {
+    std::optional<State> previous;
+    if (objectRoutes_ && hasAbsState(node))
+        previous = state(node);
     State merged = bottomState();
     bool hasFeasiblePredecessor = false;
 
     for (const ICFGEdge* edge : orderedIncomingEdges(node))
     {
         const ICFGNode* predecessor = edge->getSrcNode();
-        if (stateTrace_.count(predecessor) == 0)
+        if (abstractTrace_.count(predecessor) == 0)
             continue;
 
         bool shouldMerge = false;
@@ -2480,7 +3402,7 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
             // TOP summary; the summary resumes through copyAbstractState().
             shouldMerge =
                 returnSite &&
-                stateTrace_.count(returnSite->getCallICFGNode()) != 0;
+                abstractTrace_.count(returnSite->getCallICFGNode()) != 0;
         }
         if (!shouldMerge)
             continue;
@@ -2498,20 +3420,25 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
         if (source.isBottom())
             continue;
 
+        recordIncomingAbstractState(edge, source);
+        if (objectRoutes_)
+            source = sparseObjectPredecessor(source);
         merged.joinWith(source);
         hasFeasiblePredecessor = true;
     }
 
     if (!hasFeasiblePredecessor)
         return false;
-    stateTrace_.insert_or_assign(node, std::move(merged));
+    abstractTrace_.insert_or_assign(node, std::move(merged));
+    if (objectRoutes_)
+        pullSparseObjectRoutes(node, previous ? &*previous : nullptr);
     return true;
 }
 
 void AbstractInterpretation::applyRelationalCallBoundary(
     State& source, const ICFGEdge* edge, const ICFGNode* target) const
 {
-    if (Options::AEDomain() == AENumericalDomain::Box ||
+    if (numericalDomain() == AENumericalDomain::Box ||
             Options::AERelationalCallPolicy() != IntraproceduralCalls ||
             (!SVFUtil::isa<CallCFGEdge>(edge) &&
              !SVFUtil::isa<RetCFGEdge>(edge)) || source.isBottom())
@@ -2540,7 +3467,7 @@ void AbstractInterpretation::applyRelationalCallBoundary(
     if (!returnSite)
         return;
     const CallICFGNode* call = returnSite->getCallICFGNode();
-    if (!call || stateTrace_.count(call) == 0)
+    if (!call || abstractTrace_.count(call) == 0)
         return;
 
     // Caller SSA values are immutable across the call. Restore their
@@ -2574,9 +3501,70 @@ void AbstractInterpretation::applyReturnEdgeTransfer(
     const bool numericalMayBeUninitialized =
         source.numericalMayBeUninitialized(sourceVariable);
     source.assignValueFrom(targetVariable, source, sourceVariable);
+    if (intervalPreanalysis_ && target->isPointer())
+        source.setInterval(intervalOffsetVariable(target), intervalPointerOffset(value, source));
     if (!numericalMayBeUninitialized)
         source.numerical().assign(
                   targetVariable, SVF::LinearExpression(sourceVariable));
+    const CallICFGNode* call = edge->getCallSite();
+    const FunObjVar* callee = edge->getSrcNode()->getFun();
+    if ((sparsity() != Dense && !packSSAEnabled()) ||
+            numericalDomain() == AENumericalDomain::Box ||
+            Options::AERelationalCallPolicy() != ThroughCalls || !call ||
+            !callee || !call->getCaller() || !hasAbsState(call) || target->isPointer() ||
+            numericalMayBeUninitialized ||
+            preAnalysis->getPointerAnalysis()->isInRecursion(callee))
+        return;
+
+    // Instantiate a relation over formal inputs and the return value with
+    // this call's actual inputs. No caller is equated to a shared formal.
+    const auto& formals = icfg->getFunEntryICFGNode(callee)->getFormalParms();
+    std::map<SVF::Variable, SVF::LinearExpression> replacements;
+    std::vector<SVF::Variable> retained{sourceVariable};
+    replacements.emplace(sourceVariable, SVF::LinearExpression(targetVariable));
+    for (std::size_t i = 0; i < formals.size() && i < call->arg_size(); ++i)
+    {
+        const auto* formal = SVFUtil::dyn_cast<ValVar>(formals[i]);
+        const auto* actual = SVFUtil::dyn_cast<ValVar>(call->getArgument(i));
+        if (!formal || formal->isPointer() || !adapter_.contains(*formal) || !actual)
+            continue;
+        const auto symbol = adapter_.variable(*formal);
+        if (const auto* constant = SVFUtil::dyn_cast<ConstIntValVar>(actual))
+        {
+            const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(actual->getType());
+            const s64_t literal = type && type->isBoolean() ? (constant->getSExtValue() != 0 ? 1 : 0)
+                                  : constant->getSExtValue();
+            replacements.emplace(symbol, SVF::LinearExpression(SVF::Rational(literal)));
+        }
+        else if (adapter_.contains(*actual) &&
+                 !state(call).numericalMayBeUninitialized(adapter_.variable(*actual)))
+            replacements.emplace(symbol, SVF::LinearExpression(adapter_.variable(*actual)));
+        else
+            continue;
+        retained.push_back(symbol);
+    }
+    State summary = source;
+    summary.numerical().project(retained);
+
+    // Caller SSA values cannot be modified by a non-recursive callee. Keep
+    // their call-site values and relations rather than joining other callers.
+    State caller = state(call);
+    std::vector<SVF::Variable> callerValues;
+    for (auto it = svfir->begin(); it != svfir->end(); ++it)
+        if (const auto* v = SVFUtil::dyn_cast<ValVar>(it->second))
+            if (v != target && v->getFunction() == call->getCaller() && adapter_.contains(*v))
+            {
+                const auto symbol = adapter_.variable(*v);
+                callerValues.push_back(symbol);
+                source.assignValueFrom(symbol, caller, symbol);
+            }
+    caller.numerical().project(callerValues);
+    source.numerical().meetWith(caller.numerical());
+    source.numerical().forget(targetVariable);
+    for (const auto& constraint : summary.numerical().toConstraints())
+        source.assume(SVF::LinearConstraint(
+                          constraint.expression().substituted(replacements), constraint.kind()));
+
 }
 
 void AbstractInterpretation::recordMergedReturnSummary(
@@ -2589,6 +3577,8 @@ void AbstractInterpretation::recordMergedReturnSummary(
 
 void AbstractInterpretation::handleSVFStatement(const SVFStmt* stmt)
 {
+    if (intervalPreanalysis_)
+        intervalStatementInputs_.insert_or_assign(stmt, state(stmt->getICFGNode()));
     // Memory-copy annotations synthesize pointer-analysis loads/stores. The
     // byte-aware external model owns their numerical effects; applying both
     // models can havoc memory even for a zero-length copy.
@@ -2654,6 +3644,8 @@ void AbstractInterpretation::handleSVFStatement(const SVFStmt* stmt)
     }
     else
         assert(false && "implement this part");
+    if (intervalPreanalysis_)
+        updateIntervalPointerOffsets(stmt, intervalStatementInputs_.at(stmt));
     // NullPtr should not be changed by any statement. If the entry is missing
     // (not yet auto-inserted) we treat that as "unchanged" — only check the
     // entry if it actually exists.
@@ -2670,181 +3662,6 @@ void AbstractInterpretation::updateStateOnGep(const GepStmt* gep)
 }
 
 void AbstractInterpretation::updateStateOnSelect(const SelectStmt* select)
-{
-    updateStateOnSelectValue(select);
-    const IntraCFGEdge* guard = piGuard(select);
-    if (!guard)
-        return;
-    const std::vector<SVF::LinearConstraint> constraints = piConstraints(select, guard);
-    if (constraints.empty())
-        return;
-    const ICFGNode* node = select->getICFGNode();
-    const SVF::Variable target = adapter_.variable(*SVFUtil::cast<ValVar>(select->getRes()));
-    if (Options::AESparsity() == AbstractInterpretation::Dense)
-    {
-        State& denseState = ensureState(node);
-        if (!denseState.isBottom())
-            for (const auto& constraint : constraints)
-                denseState.assume(constraint);
-        return;
-    }
-    // Sparse executors keep SSA values in definition summaries: make the
-    // guard part of x.pi's definition (research D-013 item 3).
-    const auto* operand = SVFUtil::dyn_cast<ValVar>(select->getTrueValue());
-    if (!operand || !adapter_.contains(*operand))
-        return;
-    State alternative = phiAlternativeState(node);
-    if (alternative.numericalMayBeUninitialized(adapter_.variable(*operand)))
-        return;
-    alternative.assignNumeric(target, SVF::LinearExpression(adapter_.variable(*operand)));
-    for (const auto& constraint : constraints)
-        alternative.assume(constraint);
-    alternative.numerical().project(alternative.numerical().relationalClosure({target}));
-    scalarTransferState(node).numerical().meetWith(alternative.numerical());
-    recordRelationalSummary(target, alternative, node);
-}
-
-const IntraCFGEdge* AbstractInterpretation::piGuard(const SelectStmt* select) const
-{
-    if (!Options::PiNodes() || select->getTrueValue() != select->getFalseValue())
-        return nullptr;
-    const SVFBasicBlock* block = select->getICFGNode()->getBB();
-    if (!block || block->getICFGNodeList().empty())
-        return nullptr;
-    const ICFGNode* entry = block->getICFGNodeList().front();
-    if (entry->getInEdges().size() != 1)
-        return nullptr;
-    const auto* edge = SVFUtil::dyn_cast<IntraCFGEdge>(*entry->getInEdges().begin());
-    if (!edge || !edge->getCondition())
-        return nullptr;
-    if (edge->isSwitchEdge())
-        return edge->getCondition() == select->getTrueValue() ? edge : nullptr;
-    return edge->getCondition() == select->getCondition() ? edge : nullptr;
-}
-
-bool AbstractInterpretation::edgeHasPiNodes(const IntraCFGEdge* edge) const
-{
-    if (!Options::PiNodes() || Options::AESparsity() != AbstractInterpretation::Dense)
-        return false;
-    const SVFBasicBlock* block = edge->getDstNode()->getBB();
-    if (!block)
-        return false;
-    for (const ICFGNode* node : block->getICFGNodeList())
-        for (const SVFStmt* statement : node->getSVFStmts())
-            if (const auto* select = SVFUtil::dyn_cast<SelectStmt>(statement))
-                if (piGuard(select) == edge)
-                    return true;
-    return false;
-}
-
-std::vector<SVF::LinearConstraint> AbstractInterpretation::piConstraints(
-    const SelectStmt* select, const IntraCFGEdge* guard)
-{
-    std::vector<SVF::LinearConstraint> constraints;
-    const auto* target = SVFUtil::dyn_cast<ValVar>(select->getRes());
-    if (!target || !adapter_.contains(*target) || target->isPointer())
-        return constraints;
-    const SVF::LinearExpression pi(adapter_.variable(*target));
-    if (guard->isSwitchEdge())
-    {
-        // Same restrictions as the switch edge refinement in assumeBranch.
-        const auto& cases = guard->getSwitchCases();
-        if (guard->includesSwitchDefault() || guard->getSwitchWidth() < 32 ||
-                guard->getSwitchWidth() > 64 || cases.empty())
-            return constraints;
-        const auto limits = std::minmax_element(cases.begin(), cases.end());
-        constraints.emplace_back(pi - SVF::LinearExpression(SVF::Rational(*limits.first)),
-                                 SVF::ConstraintKind::GreaterEqual);
-        constraints.emplace_back(pi - SVF::LinearExpression(SVF::Rational(*limits.second)),
-                                 SVF::ConstraintKind::LessEqual);
-        return constraints;
-    }
-    const auto* comparison = guard->getCondition()->getInEdges().empty()
-                             ? nullptr
-                             : SVFUtil::dyn_cast<CmpStmt>(*guard->getCondition()->getInEdges().begin());
-    if (!comparison)
-        return constraints;
-    const SVFVar* operand = select->getTrueValue();
-    const bool left = comparison->getOpVar(0) == operand;
-    if (!left && comparison->getOpVar(1) != operand)
-        return constraints;
-    const SVFVar* other = comparison->getOpVar(left ? 1 : 0);
-    // D-014 item 6: the other side is a direct operand, a variable or a value.
-    std::optional<SVF::LinearExpression> otherExpression;
-    const ICFGNode* source = guard->getSrcNode();
-    if (const auto* value = SVFUtil::dyn_cast<ValVar>(other);
-            value && adapter_.contains(*value) && !value->isPointer())
-        otherExpression = SVF::LinearExpression(adapter_.variable(*value));
-    else if (const SVF::Interval constant = getInterval(other, source); constant.isSingleton())
-        otherExpression = SVF::LinearExpression(constant.singletonValue());
-    if (!otherExpression)
-        return constraints;
-    s32_t predicate = comparison->getPredicate();
-    // D-006: an unsigned comparison is refined as the signed one only when
-    // both sides are known non-negative.
-    const auto unsignedToSigned = [](s32_t p) -> s32_t
-    {
-        switch (p)
-    {
-    case CmpStmt::ICMP_ULT:
-        return CmpStmt::ICMP_SLT;
-    case CmpStmt::ICMP_ULE:
-        return CmpStmt::ICMP_SLE;
-    case CmpStmt::ICMP_UGT:
-        return CmpStmt::ICMP_SGT;
-    case CmpStmt::ICMP_UGE:
-        return CmpStmt::ICMP_SGE;
-    default:
-        return -1;
-    }
-};
-if (const s32_t signedPredicate = unsignedToSigned(predicate); signedPredicate >= 0)
-    {
-        const SVF::Interval self = getInterval(operand, source);
-        const SVF::Interval rest = getInterval(other, source);
-        const auto nonNegative = [](const SVF::Interval& interval)
-        {
-            return !interval.isBottom() && interval.lower().isFinite() &&
-                   interval.lower().value() >= SVF::Rational(0);
-        };
-        if (!nonNegative(self) || !nonNegative(rest))
-            return constraints;
-        predicate = signedPredicate;
-    }
-    const bool taken = guard->getSuccessorCondValue() != 0;
-    std::optional<SVF::ConstraintKind> kind;
-    switch (predicate)
-    {
-    case CmpStmt::ICMP_EQ:
-        kind = taken ? SVF::ConstraintKind::Equal : SVF::ConstraintKind::NotEqual;
-        break;
-    case CmpStmt::ICMP_NE:
-        kind = taken ? SVF::ConstraintKind::NotEqual : SVF::ConstraintKind::Equal;
-        break;
-    case CmpStmt::ICMP_SLT:
-        kind = taken ? SVF::ConstraintKind::LessThan : SVF::ConstraintKind::GreaterEqual;
-        break;
-    case CmpStmt::ICMP_SLE:
-        kind = taken ? SVF::ConstraintKind::LessEqual : SVF::ConstraintKind::GreaterThan;
-        break;
-    case CmpStmt::ICMP_SGT:
-        kind = taken ? SVF::ConstraintKind::GreaterThan : SVF::ConstraintKind::LessEqual;
-        break;
-    case CmpStmt::ICMP_SGE:
-        kind = taken ? SVF::ConstraintKind::GreaterEqual : SVF::ConstraintKind::LessThan;
-        break;
-    default:
-        break;
-    }
-    if (!kind)
-        return constraints;
-    const SVF::LinearExpression lhs = left ? pi : *otherExpression;
-    const SVF::LinearExpression rhs = left ? *otherExpression : pi;
-    constraints.emplace_back(lhs - rhs, *kind);
-    return constraints;
-}
-
-void AbstractInterpretation::updateStateOnSelectValue(const SelectStmt* select)
 {
     const ICFGNode* node = select->getICFGNode();
     const SVF::Interval condition = getInterval(select->getCondition(), node);
@@ -2870,7 +3687,7 @@ void AbstractInterpretation::updateStateOnSelectValue(const SelectStmt* select)
     }
     updateValue(select->getRes(), interval, addresses, node);
 
-    if (Options::AEDomain() == AENumericalDomain::Box)
+    if (numericalDomain() == AENumericalDomain::Box)
         return;
     const auto* target = SVFUtil::dyn_cast<ValVar>(select->getRes());
     if (!target || !adapter_.contains(*target))
@@ -2935,7 +3752,8 @@ bool AbstractInterpretation::phiEdgeBlock(const SVFBasicBlock* block)
 {
     // SVF_AE_PHI_LEGACY=1 keeps the pre-D-009 per-phi transfer (ablation).
     static const bool legacy = std::getenv("SVF_AE_PHI_LEGACY") != nullptr;
-    if (!block || legacy || Options::AESparsity() != AbstractInterpretation::Dense)
+    if (!block || legacy ||
+            (sparsity() != Dense && !packSSAEnabled()))
         return false;
     const auto cached = phiEdgeBlocks_.find(block);
     if (cached != phiEdgeBlocks_.end())
@@ -3036,7 +3854,16 @@ void AbstractInterpretation::applyPhiEdgeTransfer(
     for (SVF::Variable variable : mayBeUninitialized)
         state.addUninitializedNumericalAlternative(variable);
     for (const auto& [variable, source] : copies)
+    {
         state.assignValueFrom(variable, before, source);
+        if (intervalPreanalysis_)
+        {
+            const auto* target = adapter_.value(variable);
+            const auto* value = adapter_.value(source);
+            if (target && target->isPointer() && value)
+                state.setInterval(intervalOffsetVariable(target), intervalPointerOffset(value, before));
+        }
+    }
 }
 
 void AbstractInterpretation::updateStateOnPhi(const PhiStmt* phi)
@@ -3091,7 +3918,7 @@ void AbstractInterpretation::updateStateOnPhi(const PhiStmt* phi)
                 addresses.joinWith(getAddressSet(phi->getOpVar(i),
                                                  opICFGNode));
 
-                if (Options::AEDomain() != AENumericalDomain::Box)
+                if (numericalDomain() != AENumericalDomain::Box)
                 {
                     const auto* target =
                         SVFUtil::dyn_cast<ValVar>(phi->getRes());
@@ -3172,7 +3999,7 @@ void AbstractInterpretation::updateStateOnPhi(const PhiStmt* phi)
     // part of the enclosing loop header and guarantees termination even when
     // it is not the WTO component's first ICFG node.
     if (const auto* result = SVFUtil::dyn_cast<ValVar>(phi->getRes());
-            Options::AEDomain() != Box && result)
+            numericalDomain() != Box && result)
     {
         const auto history = phiIntervalHistory_.find(phi);
         SVF::Interval previous = history == phiIntervalHistory_.end()
@@ -3245,7 +4072,7 @@ void AbstractInterpretation::updateStateOnPhiGroupAtNode(
 void AbstractInterpretation::updateStateOnPhiGroup(
     const std::vector<const PhiStmt*>& phis)
 {
-    if (Options::AEDomain() == AENumericalDomain::Box || phis.size() < 2)
+    if (numericalDomain() == AENumericalDomain::Box || phis.size() < 2)
         return;
 
     // Ignore non-numerical members without disabling a valid numerical tuple.
@@ -3421,12 +4248,12 @@ void AbstractInterpretation::updateStateOnCall(const CallPE* callPE)
     for (u32_t i = 0; i < callPE->getOpVarNum(); i++)
     {
         const ICFGNode* opICFGNode = callPE->getOpCallICFGNode(i);
-        if (hasAbsState(opICFGNode))
+        if (hasAbsState(opICFGNode) && !state(opICFGNode).isBottom())
         {
             interval.joinWith(getInterval(callPE->getOpVar(i), opICFGNode));
             addresses.joinWith(getAddressSet(callPE->getOpVar(i),
                                              opICFGNode));
-            if (Options::AEDomain() != AENumericalDomain::Box &&
+            if (numericalDomain() != AENumericalDomain::Box &&
                     Options::AERelationalCallPolicy() == ThroughCalls &&
                     !sharedContextInsensitiveFormal)
             {
@@ -3486,10 +4313,15 @@ void AbstractInterpretation::updateStateOnCall(const CallPE* callPE)
 void AbstractInterpretation::updateStateOnRet(const RetPE* retPE)
 {
     const ICFGNode* node = retPE->getICFGNode();
+    // Return edges already bind the result and instantiate the summary.
+    if ((sparsity() == Dense || packSSAEnabled()) &&
+            numericalDomain() != AENumericalDomain::Box)
+        return;
+
     updateValue(retPE->getLHSVar(),
                 getDefinedInterval(retPE->getRHSVar(), node),
                 getAddressSet(retPE->getRHSVar(), node), node);
-    if (Options::AEDomain() == AENumericalDomain::Box ||
+    if (numericalDomain() == AENumericalDomain::Box ||
             Options::AERelationalCallPolicy() == IntraproceduralCalls)
         return;
     // A context-insensitive callee summary shared by multiple call sites has
@@ -3604,7 +4436,9 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
     const auto* integerType =
         SVFUtil::dyn_cast<SVFIntegerType>(binary->getRes()->getType());
     const SVF::Interval typeRange =
-        integerType ? utils->getRangeLimitFromType(binary->getRes()->getType())
+        integerType && integerType->isBoolean() && numericalDomain() != AENumericalDomain::Box
+        ? SVF::Interval::closed(SVF::Rational(0), SVF::Rational(1))
+        : integerType ? utils->getRangeLimitFromType(binary->getRes()->getType())
         : SVF::Interval::top();
     const bool intervalProvesNoIntegerWrap =
         integerType && !result.isBottom() && result.isSubsetOf(typeRange);
@@ -3616,7 +4450,7 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
     // intervals of x and y are both Top.  Requiring operand-wise interval
     // arithmetic to prove no-wrap first would prevent Octagon/Polyhedra from
     // answering precisely the expressions they are designed to represent.
-    if (Options::AEDomain() != AENumericalDomain::Box && integerType)
+    if (numericalDomain() != AENumericalDomain::Box && integerType)
     {
         const auto expressionFor = [&](const SVFVar* operand)
                                    -> std::optional<SVF::LinearExpression>
@@ -3695,7 +4529,7 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
     // relational domain proves that the LLVM integer operation cannot wrap.
     // Floating-point operations retain interval semantics because rounding and
     // NaN behavior are not affine over rationals.
-    if (Options::AEDomain() != AENumericalDomain::Box && noIntegerWrap)
+    if (numericalDomain() != AENumericalDomain::Box && noIntegerWrap)
     {
         const auto* resultValue =
             SVFUtil::dyn_cast<ValVar>(binary->getRes());
@@ -3716,11 +4550,11 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
             return;
         }
     }
-    if (Options::AEDomain() != AENumericalDomain::Box &&
+    if (numericalDomain() != AENumericalDomain::Box &&
             integerType && !noIntegerWrap)
         result = SVF::wrapIntegerInterval(
-                     result, binary->getRes()->getType()->getByteSize() * 8,
-                     integerType->isSigned());
+                     result, integerType->isBoolean() ? 1 : binary->getRes()->getType()->getByteSize() * 8,
+                     integerType->isBoolean() ? false : integerType->isSigned());
     updateInterval(binary->getRes(), result, node);
 }
 
@@ -3740,6 +4574,17 @@ void AbstractInterpretation::updateStateOnCmp(const CmpStmt* cmp)
     };
 
     const auto predicate = cmp->getPredicate();
+    const auto* operandType = SVFUtil::dyn_cast<SVFIntegerType>(cmp->getOpVar(0)->getType());
+    const bool signedBoolean = numericalDomain() != AENumericalDomain::Box &&
+                               operandType && operandType->isBoolean() &&
+                               (predicate == CmpStmt::ICMP_SLT || predicate == CmpStmt::ICMP_SLE ||
+                                predicate == CmpStmt::ICMP_SGT || predicate == CmpStmt::ICMP_SGE);
+    if (signedBoolean)
+    {
+        const auto zero = SVF::Interval::singleton(SVF::Rational(0));
+        lhsInterval = SVF::subtract(zero, lhsInterval);
+        rhsInterval = SVF::subtract(zero, rhsInterval);
+    }
     if (!addressComparison &&
             (lhsInterval.isBottom() || rhsInterval.isBottom()))
     {
@@ -3876,7 +4721,7 @@ void AbstractInterpretation::updateStateOnCmp(const CmpStmt* cmp)
         // numerical state directly before leaving a Boolean result at [0, 1].
         // Unsigned order predicates are excluded because their modular order
         // is not mathematical integer order.
-        if (result == SVF::Interval::closed(SVF::Rational(0), SVF::Rational(1)))
+        if (!signedBoolean && result == SVF::Interval::closed(SVF::Rational(0), SVF::Rational(1)))
         {
             const State pointLocal = ensureState(node);
             const bool separateScalarCarrier =
@@ -3983,18 +4828,27 @@ void AbstractInterpretation::updateStateOnLoad(const LoadStmt* load)
                 << " pointees="
                 << getAddressSet(load->getRHSVar(), node).toString()
                 << " result=" << addresses.toString() << '\n';
+    const SVF::AddressSet loadPointees = numericalDomain() == AENumericalDomain::Box
+        ? SVF::AddressSet::bottom() : getAddressSet(load->getRHSVar(), node);
+    std::optional<State> relationalBefore;
+    if (numericalDomain() != AENumericalDomain::Box &&
+            sparsity() != AESparsity::VersionedSparse && !loadPointees.isSingleton() && !loadPointees.hasUnknownObject())
+        relationalBefore = ensureState(node);
     updateValue(load->getLHSVar(), interval, addresses, node);
     if (numericalMayBeUninitialized)
         addUninitializedNumericalAlternative(load->getLHSVar(), node);
-    if (Options::AEDomain() != AENumericalDomain::Box)
+    if (relationalBefore && !numericalMayBeUninitialized)
+        joinRelationalMemory(SVFUtil::dyn_cast<ValVar>(load->getLHSVar()),
+                             loadPointees, *relationalBefore, node, false);
+    if (numericalDomain() != AENumericalDomain::Box)
     {
-        const SVF::AddressSet pointees = getAddressSet(load->getRHSVar(), node);
+        const SVF::AddressSet& pointees = loadPointees;
         if (pointees.isSingleton())
         {
             const SVF::Location location = *pointees.begin();
             const ObjVar* object = location.isNull() ? nullptr
                                    : objectAt(location);
-            if (object)
+            if (object && canStrongStore(pointees, *object, state(node)))
                 assignRelationalLoad(
                     SVFUtil::dyn_cast<ValVar>(load->getLHSVar()),
                     memoryVariable(*object, ensureState(node)), node);
@@ -4017,12 +4871,33 @@ void AbstractInterpretation::updateStateOnStore(const StoreStmt* store)
                 << " source=" << store->getRHSVar()->getId()
                 << " value="
                 << getAddressSet(store->getRHSVar(), node).toString() << '\n';
+    const SVF::AddressSet storePointees = numericalDomain() == AENumericalDomain::Box
+        ? SVF::AddressSet::bottom() : getAddressSet(store->getLHSVar(), node);
+    const auto* source = SVFUtil::dyn_cast<ValVar>(store->getRHSVar());
+    std::optional<State> relationalBefore;
+    if (numericalDomain() != AENumericalDomain::Box &&
+            sparsity() != AESparsity::VersionedSparse && source &&
+            (adapter_.contains(*source) || SVFUtil::isa<ConstIntValVar>(source) ||
+             SVFUtil::isa<ConstFPValVar>(source)) && !storePointees.isSingleton() &&
+            !storePointees.hasUnknownObject())
+    {
+        State& current = ensureState(node);
+        for (SVF::Location location : storePointees.locations())
+            if (!location.isNull())
+                if (const ObjVar* object = objectAt(location))
+                    memoryVariable(*object, current);
+        relationalBefore = current;
+        if (adapter_.contains(*source))
+            materializeRelations(*relationalBefore, {adapter_.variable(*source)}, node);
+    }
     storeValue(SVFUtil::cast<ValVar>(store->getLHSVar()),
                getInterval(store->getRHSVar(), node),
                getAddressSet(store->getRHSVar(), node), node);
-    if (Options::AEDomain() != AENumericalDomain::Box)
+    if (relationalBefore)
+        joinRelationalMemory(source, storePointees, *relationalBefore, node, true);
+    if (numericalDomain() != AENumericalDomain::Box)
     {
-        const SVF::AddressSet pointees = getAddressSet(store->getLHSVar(), node);
+        const SVF::AddressSet& pointees = storePointees;
         if (pointees.isSingleton())
         {
             const SVF::Location location = *pointees.begin();
@@ -4045,13 +4920,28 @@ void AbstractInterpretation::updateStateOnCopy(const CopyStmt* copy)
     const SVF::Interval rhsInterval = getInterval(rhsVar, node);
     const SVF::AddressSet rhsAddresses = getAddressSet(rhsVar, node);
 
+    const auto* booleanType = SVFUtil::dyn_cast<SVFIntegerType>(rhsVar->getType());
+    if (numericalDomain() != AENumericalDomain::Box && booleanType &&
+            booleanType->isBoolean() && copy->getCopyKind() == CopyStmt::SEXT)
+    {
+        const SVF::Interval extended = SVF::subtract(SVF::Interval::singleton(SVF::Rational(0)), rhsInterval);
+        const auto* value = SVFUtil::dyn_cast<ValVar>(rhsVar);
+        const auto* target = SVFUtil::dyn_cast<ValVar>(lhsVar);
+        if (value && target && adapter_.contains(*value) && adapter_.contains(*target))
+            assignRelationalValue(target, SVF::LinearExpression(adapter_.variable(*value)) * SVF::Rational(-1),
+                                  extended, rhsAddresses, node);
+        else
+            updateInterval(lhsVar, extended, node);
+        return;
+    }
+
     // D-005: the source is a machine value of its own type, so clip it to
     // that range before deciding whether sign extension is value-preserving.
     SVF::Interval rhsMachine = rhsInterval;
     if (!rhsMachine.isBottom() && SVFUtil::isa<SVFIntegerType>(rhsVar->getType()))
         rhsMachine.meetWith(utils->getRangeLimitFromType(rhsVar->getType()));
     const bool exactAffineCopy =
-        Options::AEDomain() != AENumericalDomain::Box &&
+        numericalDomain() != AENumericalDomain::Box &&
         (copy->getCopyKind() == CopyStmt::COPYVAL ||
          copy->getCopyKind() == CopyStmt::SEXT ||
          (copy->getCopyKind() == CopyStmt::ZEXT && rhsInterval.lower().isFinite() &&
@@ -4130,8 +5020,10 @@ void AbstractInterpretation::updateStateOnCopy(const CopyStmt* copy)
             lhsVar,
             destinationType
             ? SVF::wrapIntegerInterval(rhsInterval,
-                                       lhsVar->getType()->getByteSize() * 8,
-                                       destinationType->isSigned())
+                                       numericalDomain() != AENumericalDomain::Box && destinationType->isBoolean()
+                                       ? 1 : lhsVar->getType()->getByteSize() * 8,
+                                       numericalDomain() != AENumericalDomain::Box && destinationType->isBoolean()
+                                       ? false : destinationType->isSigned())
             : SVF::Interval::top(),
             node);
     }

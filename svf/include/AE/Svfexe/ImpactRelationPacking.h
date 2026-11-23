@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 namespace SVF
@@ -35,6 +36,7 @@ class SVFIRAdapter;
 class PointerAnalysis;
 class ICFGNode;
 class AllocationSizeModel;
+class AbstractInterpretation;
 struct ImpactPackingQuery
 {
     unsigned node;
@@ -59,14 +61,16 @@ struct ImpactPackingResult
 /// pinned upstream revision). Each ICFG node and edge is
 /// compiled once into Sparrow commands (set/forget/assume over V, including
 /// Size(o) coordinates); a reverse-postorder worklist runs them with
-/// Sparrow's accumulate-and-widen iteration. Only Andersen points-to is used.
+/// Sparrow's accumulate-and-widen iteration. Original query selection uses
+/// pointwise Box facts; the query-component extension remains separately selectable.
 class ImpactRelationPacking
 {
 public:
     ImpactRelationPacking(SVFIR& ir, const SVFIRAdapter& adapter,
                           PointerAnalysis& pointsTo,
                           std::vector<const ICFGNode*> entries = {},
-                          const AllocationSizeModel* sizes = nullptr);
+                          const AllocationSizeModel* sizes = nullptr,
+                          const AbstractInterpretation* intervals = nullptr);
     ~ImpactRelationPacking();
     ImpactPackingResult pack(const std::vector<SVF::Variable>& vocabulary) const;
 
@@ -74,6 +78,8 @@ public:
     /// registered by the LLVM front end. Sparrow forgets x for x := x + 1;
     /// after mem2reg both SSA names map to the same source variable.
     static void setSourceVariables(std::map<NodeID, std::uintptr_t> sourceVariables);
+    static void setExternalObjects(std::set<NodeID> objects);
+    static bool isExternalObject(NodeID object);
 
 private:
     SVFIR& ir_;
@@ -81,6 +87,7 @@ private:
     PointerAnalysis& pointsTo_;
     std::vector<const ICFGNode*> entries_;
     const AllocationSizeModel* sizes_;
+    const AbstractInterpretation* intervals_;
     std::unique_ptr<AllocationSizeModel> ownedSizes_;
 };
 }

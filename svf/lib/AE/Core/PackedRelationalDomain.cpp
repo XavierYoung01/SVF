@@ -77,7 +77,7 @@ void restrictBound(BoxDomain& d,Variable v,const Interval& i)
                 i.upper().isStrict()?ConstraintKind::LessThan:ConstraintKind::LessEqual));
 }
 }
-std::shared_ptr<const PackedRelationalDomain::Layout> PackedRelationalDomain::layoutFor(
+std::shared_ptr<PackedRelationalDomain::Layout> PackedRelationalDomain::layoutFor(
     const std::shared_ptr<const Packing>& packing)
 {
     if(!packing) throw std::invalid_argument("null packing");
@@ -86,7 +86,7 @@ std::shared_ptr<const PackedRelationalDomain::Layout> PackedRelationalDomain::la
     struct Entry
     {
         std::weak_ptr<const Packing> packing;
-        std::shared_ptr<const Layout> layout;
+        std::shared_ptr<Layout> layout;
     };
     static std::map<const Packing*,Entry> cache;
     static std::mutex mutex;
@@ -113,6 +113,7 @@ std::shared_ptr<const PackedRelationalDomain::Layout> PackedRelationalDomain::la
             const auto physical=layout->physicalToLogical.size();
             layout->logicalToPhysical.push_back(physical);
             layout->physicalToLogical.push_back(logical);
+            layout->variables.push_back(pack);
             for(auto v:pack) layout->owners[v].push_back(physical);
         }
     }
@@ -121,6 +122,27 @@ std::shared_ptr<const PackedRelationalDomain::Layout> PackedRelationalDomain::la
         else ++it;
     cache[packing.get()]= {packing,layout};
     return layout;
+}
+void PackedRelationalDomain::registerVariable(
+    const std::shared_ptr<const Packing>& packing, std::size_t logical, Variable variable)
+{
+    auto layout = layoutFor(packing);
+    const auto physical = layout->logicalToPhysical.at(logical);
+    if (physical == std::numeric_limits<std::size_t>::max() ||
+            variable.type().kind == NumericKind::IEEEFloat)
+        throw std::invalid_argument("runtime coordinate requires a relational pack");
+    auto& owners = layout->owners[variable];
+    if (!owners.empty() && owners != std::vector<std::size_t>{physical})
+        throw std::invalid_argument("runtime coordinate already belongs to another pack");
+    owners = {physical};
+    auto& variables = layout->variables.at(physical);
+    const auto position = std::lower_bound(variables.begin(), variables.end(), variable);
+    if (position == variables.end() || *position != variable)
+        variables.insert(position, variable);
+}
+const std::vector<Variable>& PackedRelationalDomain::packVariables(std::size_t logical) const
+{
+    return layout_->variables.at(layout_->logicalToPhysical.at(logical));
 }
 PackedRelationalDomain::PackedRelationalDomain(std::shared_ptr<const Packing> p,bool bottom)
     :packing_(std::move(p)),layout_(layoutFor(packing_)),box_(bottom?BoxDomain::bottom():BoxDomain::top())
@@ -164,22 +186,26 @@ const std::vector<std::size_t>& PackedRelationalDomain::relationalPackIndices() 
 {
     return layout_->physicalToLogical;
 }
-bool PackedRelationalDomain::singleton(Variable v) const
+bool PackedRelationalDomain::usesFallback(Variable v) const
 {
-    return layout_->singletons.count(v)!=0;
+    return layout_->owners.count(v) == 0;
 }
 bool PackedRelationalDomain::contains(std::size_t p,Variable v) const
 {
-    const auto& pack=packing_->at(layout_->physicalToLogical.at(p));
-    return std::binary_search(pack.begin(),pack.end(),v);
+    const auto found = layout_->owners.find(v);
+    return found != layout_->owners.end() &&
+           std::find(found->second.begin(), found->second.end(), p) != found->second.end();
 }
-template<class Operation>
-void PackedRelationalDomain::updateSingletons(BoxDomain& next,const std::set<Variable>& targets,
-        const std::set<Variable>& reads,Operation operation) const
+template <class Operation>
+void PackedRelationalDomain::updateFallback(BoxDomain& next,
+                                            const std::set<Variable>& targets,
+                                            const std::set<Variable>& reads,
+                                            Operation operation) const
 {
     if(packs_.empty())return;
     bool touched=false;
-    for(auto v:targets) touched|=singleton(v);
+    for (auto v : targets)
+        touched |= usesFallback(v);
     if(!touched) return;
     bool external=false;
     for(auto v:reads) external|=layout_->owners.count(v)!=0;
@@ -187,7 +213,8 @@ void PackedRelationalDomain::updateSingletons(BoxDomain& next,const std::set<Var
     auto projected=box_;
     for(auto v:reads) restrictBound(projected,v,bound(v));
     operation(projected);
-    for(auto v:targets) if(singleton(v))
+    for (auto v : targets)
+        if (usesFallback(v))
         {
             const auto interval=projected.bound(v);
             next.forget(v);
@@ -196,6 +223,9 @@ void PackedRelationalDomain::updateSingletons(BoxDomain& next,const std::set<Var
 }
 void PackedRelationalDomain::normalizeBottom()
 {
+    for (Variable v : box_.supportVariables())
+        if (layout_->owners.count(v))
+            box_.forget(v);
     if(!isBottom()) return;
     box_=BoxDomain::bottom();
     for(auto& p:packs_) p=OctagonDomain::bottom(packedConfig());
@@ -218,7 +248,7 @@ void PackedRelationalDomain::update(const std::set<Variable>& targets,const std:
         auto d=packs_[p];
         importOutside(d,p,reads);
         op(d,p);
-        d.project(packing_->at(layout_->physicalToLogical[p]));
+        d.project(layout_->variables.at(p));
         next.emplace_back(p,std::move(d));
     }
     for(auto& pair:next) packs_[pair.first]=std::move(pair.second);
@@ -233,10 +263,7 @@ void PackedRelationalDomain::assign(Variable v,const LinearExpression& e)
     }
     auto b=box_;
     b.assign(v,e);
-    updateSingletons(b, {v},vars(e),[&](auto& d)
-    {
-        d.assign(v,e);
-    });
+    updateFallback(b, {v}, vars(e), [&](auto& d) { d.assign(v, e); });
     update({v},vars(e),[&](auto& d,std::size_t)
     {
         d.assign(v,e);
@@ -254,10 +281,7 @@ void PackedRelationalDomain::assign(Variable v,const TreeExpression& e)
     }
     auto b=box_;
     b.assign(v,e);
-    updateSingletons(b, {v},vars(e),[&](auto& d)
-    {
-        d.assign(v,e);
-    });
+    updateFallback(b, {v}, vars(e), [&](auto& d) { d.assign(v, e); });
     update({v},vars(e),[&](auto& d,std::size_t)
     {
         d.assign(v,e);
@@ -282,10 +306,8 @@ void PackedRelationalDomain::assignParallel(const LinearAssignmentList& assignme
         auto r=vars(a.expression);
         reads.insert(r.begin(),r.end());
     }
-    updateSingletons(b,targets,reads,[&](auto& d)
-    {
-        d.assignParallel(assignments);
-    });
+    updateFallback(b, targets, reads,
+                   [&](auto& d) { d.assignParallel(assignments); });
     update(targets,reads,[&](auto& d,std::size_t p)
     {
         LinearAssignmentList local;
@@ -331,10 +353,7 @@ void PackedRelationalDomain::assume(const LinearConstraint& c)
     auto b=box_;
     b.assume(c);
     auto reads=vars(c.expression());
-    updateSingletons(b,reads,reads,[&](auto& d)
-    {
-        d.assume(c);
-    });
+    updateFallback(b, reads, reads, [&](auto& d) { d.assume(c); });
     update(reads,reads,[&](auto& d,std::size_t)
     {
         d.assume(c);
@@ -353,10 +372,7 @@ void PackedRelationalDomain::assume(const TreeConstraint& c)
     auto b=box_;
     b.assume(c);
     auto reads=vars(c.expression());
-    updateSingletons(b,reads,reads,[&](auto& d)
-    {
-        d.assume(c);
-    });
+    updateFallback(b, reads, reads, [&](auto& d) { d.assume(c); });
     update(reads,reads,[&](auto& d,std::size_t)
     {
         d.assume(c);
@@ -393,10 +409,7 @@ void PackedRelationalDomain::expand(Variable v,const std::vector<Variable>& copi
     b.expand(v,copies);
     std::set<Variable> targets(copies.begin(),copies.end());
     if(targets.empty()) return;
-    updateSingletons(b,targets, {v},[&](auto& d)
-    {
-        d.expand(v,copies);
-    });
+    updateFallback(b, targets, {v}, [&](auto& d) { d.expand(v, copies); });
     update(targets, {v},[&](auto& d,std::size_t p)
     {
         std::vector<Variable> local;
@@ -408,7 +421,13 @@ void PackedRelationalDomain::expand(Variable v,const std::vector<Variable>& copi
 }
 void PackedRelationalDomain::fold(Variable target,const std::vector<Variable>& folded)
 {
-    box_.fold(target,folded);
+    auto fallback = box_;
+    restrictBound(fallback, target, bound(target));
+    for (Variable v : folded)
+        restrictBound(fallback, v, bound(v));
+    fallback.fold(target, folded);
+    const auto foldedBound = fallback.bound(target);
+    box_ = std::move(fallback);
     for(std::size_t p=0; p<packs_.size(); ++p)
     {
         bool inside=contains(p,target);
@@ -418,14 +437,21 @@ void PackedRelationalDomain::fold(Variable target,const std::vector<Variable>& f
         {
             packs_[p].forget(target);
             for(auto v:folded) packs_[p].forget(v);
-            if(contains(p,target)) restrictBound(packs_[p],target,box_.bound(target));
+            if (contains(p, target))
+                restrictBound(packs_[p], target, foldedBound);
         }
     }
     normalizeBottom();
 }
 CheckResult PackedRelationalDomain::entails(const LinearConstraint& c) const
 {
-    if(isBottom() || box_.entails(c)==CheckResult::True) return CheckResult::True;
+    if (isBottom())
+        return CheckResult::True;
+    auto projected = box_;
+    for (Variable v : vars(c.expression()))
+        restrictBound(projected, v, bound(v));
+    if (projected.entails(c) == CheckResult::True)
+        return CheckResult::True;
     for(const auto& p:packs_) if(p.entails(c)==CheckResult::True) return CheckResult::True;
     return CheckResult::Unknown;
 }
@@ -440,7 +466,10 @@ Interval PackedRelationalDomain::bound(Variable v) const
 Interval PackedRelationalDomain::bound(const LinearExpression& e) const
 {
     if(isBottom()) return Interval::bottom();
-    auto b=box_.bound(e);
+    auto projected = box_;
+    for (Variable v : vars(e))
+        restrictBound(projected, v, bound(v));
+    auto b = projected.bound(e);
     for(const auto& p:packs_) b.meetWith(p.bound(e));
     return b;
 }
@@ -480,9 +509,10 @@ void PackedRelationalDomain::canonicalize()
 }
 bool PackedRelationalDomain::hasCompatibleDomain(const AbstractDomain& other) const
 {
-    return other.isDomain<PackedRelationalDomain>() &&
-           (packing_==static_cast<const PackedRelationalDomain&>(other).packing_ ||
-            *packing_==*static_cast<const PackedRelationalDomain&>(other).packing_);
+    if (!other.isDomain<PackedRelationalDomain>()) return false;
+    const auto& domain = static_cast<const PackedRelationalDomain&>(other);
+    return packing_ == domain.packing_ ||
+           (*packing_ == *domain.packing_ && layout_->owners == domain.layout_->owners);
 }
 void PackedRelationalDomain::joinDomain(const AbstractDomain& other)
 {
@@ -546,7 +576,7 @@ bool PackedRelationalDomain::leqDomain(const AbstractDomain& other) const
     {
         if(packs_[p].isSubsetOf(o.packs_[p])==CheckResult::True) continue;
         auto reduced = packs_[p];
-        for(Variable v:packing_->at(layout_->physicalToLogical[p])) restrictBound(reduced,v,bound(v));
+        for(Variable v:layout_->variables.at(p)) restrictBound(reduced,v,bound(v));
         if(reduced.isSubsetOf(o.packs_[p])!=CheckResult::True) return false;
     }
     return true;
@@ -570,7 +600,7 @@ std::vector<Variable> PackedRelationalDomain::relationalClosureState(const std::
         changed=false;
         for(auto logical:layout_->physicalToLogical)
         {
-            const auto& pack=packing_->at(logical);
+            const auto& pack=packVariables(logical);
             bool touches=false;
             for(auto v:pack) touches|=reached.count(v)!=0;
             if(touches) for(auto v:pack) changed|=reached.insert(v).second;

@@ -26,8 +26,8 @@
 #include <map>
 namespace SVF
 {
-// Production NumericalDomain adapter. Fixed logical packs plus a global Box
-// fallback for values absent from the static vocabulary (e.g. fresh objects).
+// Stable logical packs with extensible coordinates and a global Box fallback
+// for values whose numerical ownership is outside the relational schema.
 // This does not select/change the fixpoint executor.
 class PackedRelationalDomain final : public NumericalDomain
 {
@@ -38,6 +38,10 @@ public:
     using NumericalDomain::substitute;
     using NumericalDomain::substituteParallel;
     explicit PackedRelationalDomain(std::shared_ptr<const Packing>, bool bottom = false);
+    /// Extend an existing logical pack without changing its SSA identity.
+    static void registerVariable(const std::shared_ptr<const Packing>&,
+                                 std::size_t logical, Variable);
+    const std::vector<Variable>& packVariables(std::size_t logical) const;
     DomainKind kind() const noexcept override
     {
         return DomainKind::Octagon;
@@ -71,12 +75,16 @@ public:
         return packs_.size();
     }
     const std::vector<std::size_t>& relationalPackIndices() const;
+    bool ownsNumerical(Variable v) const
+    {
+        return layout_->owners.count(v) != 0;
+    }
     const BoxDomain& fallbackState() const
     {
         return box_;
     }
-    // Legacy import accepts one Octagon per logical pack and folds unary bounds
-    // into the Box. New snapshots contain only multivariable components.
+    // Legacy snapshots contain one Octagon per logical pack; singleton bounds
+    // are restored into Box. Packed numerical coordinates remain in Octagon.
     void restoreComponents(BoxDomain fallback, std::vector<OctagonDomain> packs);
     void restoreRelationalComponents(BoxDomain fallback, std::vector<OctagonDomain> packs);
 private:
@@ -95,17 +103,19 @@ private:
     std::string domainToString() const override;
     std::vector<Variable> relationalClosureState(const std::vector<Variable>&) const override;
     bool contains(std::size_t, Variable) const;
-    bool singleton(Variable) const;
+    bool usesFallback(Variable) const;
     struct Layout
     {
         std::vector<std::size_t> logicalToPhysical, physicalToLogical;
         std::map<Variable,std::vector<std::size_t>> owners;
         std::set<Variable> singletons;
+        std::vector<std::vector<Variable>> variables;
     };
-    static std::shared_ptr<const Layout> layoutFor(const std::shared_ptr<const Packing>&);
-    template<class Operation>
-    void updateSingletons(BoxDomain& next, const std::set<Variable>& targets,
-                          const std::set<Variable>& reads, Operation operation) const;
+    static std::shared_ptr<Layout> layoutFor(const std::shared_ptr<const Packing>&);
+    template <class Operation>
+    void updateFallback(BoxDomain& next, const std::set<Variable>& targets,
+                        const std::set<Variable>& reads,
+                        Operation operation) const;
     void normalizeBottom();
     void importOutside(OctagonDomain&, std::size_t, const std::set<Variable>&) const;
     void update(const std::set<Variable>& targets, const std::set<Variable>& reads,

@@ -21,7 +21,9 @@
 #include "AE/Svfexe/AllocationSize.h"
 #include "SVFIR/SVFIR.h"
 #include "Util/ExtAPI.h"
+#include <cstdlib>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace SVF
@@ -65,6 +67,44 @@ bool contains(const std::string& name, const char* part)
     return name.find(part) != std::string::npos;
 }
 } // namespace
+
+std::optional<MainArgumentEnvironment> AllocationSizeModel::mainArguments(SVFIR& ir)
+{
+    const char* profile = std::getenv("SVF_AE_MAIN_ENV");
+    if (!profile)
+        return std::nullopt;
+    if (std::string(profile) != "standard-c")
+        throw std::invalid_argument("unknown SVF_AE_MAIN_ENV profile");
+    for (auto it = ir.getICFG()->begin(); it != ir.getICFG()->end(); ++it)
+        if (const auto* entry = SVFUtil::dyn_cast<FunEntryICFGNode>(it->second))
+        {
+            const auto& args = entry->getFormalParms();
+            if (entry->getFun()->getName() != "main" || args.size() < 2 ||
+                    !integerType(args[0]) || !args[1]->isPointer())
+                continue;
+            MainArgumentEnvironment model;
+            model.entry = entry;
+            model.argc = SVFUtil::cast<ValVar>(args[0]);
+            model.argv = SVFUtil::cast<ValVar>(args[1]);
+            for (const SVFStmt* statement : ir.getSVFStmtSet(SVFStmt::Addr))
+            {
+                const auto* site = SVFUtil::cast<AddrStmt>(statement);
+                const auto* object = SVFUtil::dyn_cast<BaseObjVar>(site->getRHSVar());
+                if (!object || (site->getICFGNode() != entry &&
+                                site->getICFGNode() != ir.getICFG()->getGlobalICFGNode()))
+                    continue;
+                if (site->getLHSVar() == model.argv && object->getName() == "__svf_main_argv")
+                {
+                    model.vector = object;
+                    model.vectorSite = site;
+                }
+                else if (object->getName() == "__svf_main_argument_strings")
+                    model.strings = object;
+            }
+            return model;
+        }
+    return std::nullopt;
+}
 
 namespace
 {
@@ -139,6 +179,7 @@ const CallICFGNode* AllocationSizeModel::allocationCall(const AddrStmt* site)
 
 AllocationSizeModel::AllocationSizeModel(SVFIR& ir)
 {
+    const auto main = mainArguments(ir);
     for (const SVFStmt* statement : ir.getSVFStmtSet(SVFStmt::Addr))
     {
         const auto* site = SVFUtil::cast<AddrStmt>(statement);
@@ -169,7 +210,16 @@ AllocationSizeModel::AllocationSizeModel(SVFIR& ir)
             if (!size.operand && !SVFUtil::isa<ConstIntValVar>(stripped))
                 size.known = false;
         };
-        if (SVFUtil::isa<HeapObjVar>(object))
+        if (main && object == main->vector)
+        {
+            size.sizeValue = main->argc;
+            size.operand = main->argc;
+            size.elementBytes = main->argv->getType()->getByteSize();
+            size.unitBytes = size.elementBytes;
+            size.elementOffset = 1;
+            size.known = size.elementBytes > 0;
+        }
+        else if (SVFUtil::isa<HeapObjVar>(object))
         {
             // Sparrow models malloc as Calloc(Array e), calloc/realloc as
             // library calls setting Size, and strdup as a Size copy. SVF's

@@ -34,7 +34,6 @@
 #include "Util/SVFUtil.h"
 #include "SVF-LLVM/BasicTypes.h"
 #include "SVF-LLVM/LLVMUtil.h"
-#include "SVF-LLVM/PiNodeInsertion.h"
 #include "SVF-LLVM/CppUtil.h"
 #include "SVF-LLVM/BreakConstantExpr.h"
 #include "SVF-LLVM/SymbolTableBuilder.h"
@@ -421,28 +420,6 @@ void LLVMModuleSet::prePassSchedule()
             FPM.run(fun, FAM);
 #endif
         }
-    }
-
-    /// e-SSA pi nodes (research D-006), after exits are unified so the
-    /// function-return phi is not split. Every execution mode reads the same
-    /// IR, so query identities agree across modes.
-    if (Options::PiNodes())
-    {
-        PiNodeStatistics total;
-        for (Module &M : getLLVMModules())
-        {
-            const PiNodeStatistics statistics = insertPiNodes(M);
-            total.branches += statistics.branches;
-            total.switches += statistics.switches;
-            total.piNodes += statistics.piNodes;
-            total.renamedUses += statistics.renamedUses;
-            total.splitEdges += statistics.splitEdges;
-        }
-        if (std::getenv("SVF_AE_PHASE_STATS"))
-            SVFUtil::outs() << "AE_PI_NODES branches=" << total.branches
-                            << " switches=" << total.switches << " pi=" << total.piNodes
-                            << " renamed_uses=" << total.renamedUses
-                            << " split_edges=" << total.splitEdges << "\n";
     }
 }
 

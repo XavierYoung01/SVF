@@ -27,7 +27,7 @@
 #ifndef SVF_AE_PARTIAL_RELATIONAL_DOMAIN_H
 #define SVF_AE_PARTIAL_RELATIONAL_DOMAIN_H
 
-#include "AE/Core/NumericalDomainFactory.h"
+#include "AE/Core/NumericalDomain.h"
 
 #include <memory>
 #include <set>

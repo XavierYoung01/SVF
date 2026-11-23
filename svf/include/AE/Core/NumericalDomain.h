@@ -26,6 +26,8 @@
 
 #include "AE/Core/AbstractDomain.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <gmpxx.h>
 #include <mpfr.h>
 
@@ -37,6 +39,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <algorithm>
+#include <iterator>
 
 namespace SVF
 {
@@ -84,6 +88,7 @@ public:
         return value_ == 0;
     }
     bool isInteger() const;
+    bool tryToInt64(std::int64_t& result) const;
     std::int64_t toInt64() const;
     double toDouble() const;
     int sign() const
@@ -414,7 +419,7 @@ enum class OperationKind
     GeneratorExport
 };
 
-/// APRON-style information about the most recently completed mutating
+/// Information about the most recently completed mutating
 /// operation. `exact` means that no semantic approximation beyond the
 /// selected abstract domain was introduced. `best` means that the operation
 /// used the strongest implemented transformer for that domain and syntax.
@@ -496,7 +501,6 @@ public:
     virtual void assignParallel(const LinearAssignmentList& assignments) = 0;
     virtual void assignParallel(const TreeAssignmentList& assignments);
     /// Compute the preimage of this post-state under target := expression.
-    /// This is APRON's substitute operation, not a forward strong update.
     virtual void substitute(Variable target,
                             const LinearExpression& expression) = 0;
     void substitute(Variable target, const TreeExpression& expression);
@@ -513,13 +517,12 @@ public:
     /// Duplicate a summary variable into fresh variables. Every copy has the
     /// source variable's relations with all other variables, while the
     /// expanded variables remain mutually unrelated except where those
-    /// duplicated relations logically imply otherwise. This is APRON's
-    /// expand operation.
+    /// duplicated relations logically imply otherwise.
     virtual void expand(Variable source,
                         const std::vector<Variable>& copies) = 0;
     /// Merge several materialized variables into `target` by taking the
     /// abstract hull of every possible representative, then remove the other
-    /// variables. This is APRON's fold operation.
+    /// variables.
     virtual void fold(Variable target, const std::vector<Variable>& folded) = 0;
 
     /// Assume every constraint, letting them propagate into each other until
@@ -739,6 +742,7 @@ private:
         std::uint32_t upperBound) const;
     void makeBottom();
     void canonicalize(Variable variable);
+    void assignInterval(Variable target, const Interval& value) override;
     void setBound(Variable variable, Interval interval);
     void report(OperationKind operation, ApproximationKind approximation,
                 std::string reason, bool best = true) const;
@@ -749,6 +753,407 @@ private:
     BoundPageDirectory boundPages_;
     bool bottom_ = false;
 };
+
+class LinearExpression
+{
+public:
+    using Terms = std::map<Variable, Rational>;
+
+    LinearExpression();
+    explicit LinearExpression(Rational constant);
+    explicit LinearExpression(Variable variable);
+
+    const Terms& terms() const
+    {
+        return terms_;
+    }
+    const Rational& constant() const
+    {
+        return constant_;
+    }
+    Rational coefficient(Variable variable) const;
+
+    LinearExpression& setCoefficient(Variable variable, Rational coefficient);
+    LinearExpression& setConstant(Rational constant);
+    LinearExpression& operator+=(const LinearExpression& rhs);
+    LinearExpression& operator-=(const LinearExpression& rhs);
+    LinearExpression& operator*=(const Rational& scalar);
+
+    /// Simultaneously replace variables in this expression. Replacement
+    /// expressions are inserted verbatim: variables occurring inside a
+    /// replacement are pre-state variables and are not recursively replaced.
+    LinearExpression substituted(
+        const std::map<Variable, LinearExpression>& replacements) const;
+
+    std::string toString() const;
+
+    friend LinearExpression operator+(LinearExpression lhs,
+                                      const LinearExpression& rhs)
+    {
+        return lhs += rhs;
+    }
+    friend LinearExpression operator-(LinearExpression lhs,
+                                      const LinearExpression& rhs)
+    {
+        return lhs -= rhs;
+    }
+    friend LinearExpression operator*(LinearExpression lhs,
+                                      const Rational& scalar)
+    {
+        return lhs *= scalar;
+    }
+    friend LinearExpression operator*(const Rational& scalar,
+                                      LinearExpression rhs)
+    {
+        return rhs *= scalar;
+    }
+    friend LinearExpression operator-(LinearExpression expression)
+    {
+        return expression *= Rational(-1);
+    }
+
+private:
+    void removeZeroTerms();
+
+    Terms terms_;
+    Rational constant_;
+};
+enum class ConstraintKind
+{
+    Equal,
+    NotEqual,
+    LessThan,
+    LessEqual,
+    GreaterThan,
+    GreaterEqual
+};
+
+/// A normalized constraint of the form expression (relation) 0.
+class LinearConstraint
+{
+public:
+    LinearConstraint(LinearExpression expression, ConstraintKind kind);
+
+    const LinearExpression& expression() const
+    {
+        return expression_;
+    }
+    ConstraintKind kind() const
+    {
+        return kind_;
+    }
+    std::string toString() const;
+
+private:
+    LinearExpression expression_;
+    ConstraintKind kind_;
+};
+
+using LinearConstraintSet = std::vector<LinearConstraint>;
+
+struct WideningPolicy
+{
+    WideningPolicy() = default;
+
+    explicit WideningPolicy(std::vector<Rational> thresholdValues)
+        : thresholds(std::move(thresholdValues))
+    {
+    }
+
+    WideningPolicy(std::vector<Rational> thresholdValues,
+                   LinearConstraintSet linearThresholdValues)
+        : thresholds(std::move(thresholdValues)),
+          linearThresholds(std::move(linearThresholdValues))
+    {
+    }
+
+    std::vector<Rational> thresholds;
+    LinearConstraintSet linearThresholds;
+};
+
+struct LinearAssignment
+{
+    Variable target;
+    LinearExpression expression;
+};
+
+using LinearAssignmentList = std::vector<LinearAssignment>;
+LinearConstraint equal(LinearExpression lhs, LinearExpression rhs);
+LinearConstraint notEqual(LinearExpression lhs, LinearExpression rhs);
+LinearConstraint lessEqual(LinearExpression lhs, LinearExpression rhs);
+LinearConstraint lessThan(LinearExpression lhs, LinearExpression rhs);
+LinearConstraint greaterEqual(LinearExpression lhs, LinearExpression rhs);
+LinearConstraint greaterThan(LinearExpression lhs, LinearExpression rhs);
+
+enum class UnaryNumericOp
+{
+    Negate,
+    Cast,
+    SquareRoot
+};
+
+enum class BinaryNumericOp
+{
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder
+};
+
+class TreeExpression
+{
+public:
+    enum class Kind
+    {
+        Constant,
+        Variable,
+        Unary,
+        Binary
+    };
+
+    static TreeExpression constant(Rational value,
+                                   NumericType type = NumericType::real());
+    static TreeExpression variable(Variable value, NumericType type);
+    static TreeExpression unary(
+        UnaryNumericOp operation, TreeExpression operand, NumericType type,
+        RoundingMode rounding = RoundingMode::NearestTiesToEven);
+    static TreeExpression binary(
+        BinaryNumericOp operation, TreeExpression lhs, TreeExpression rhs,
+        NumericType type,
+        RoundingMode rounding = RoundingMode::NearestTiesToEven);
+
+    Kind kind() const
+    {
+        return kind_;
+    }
+    const NumericType& type() const
+    {
+        return type_;
+    }
+    const Rational& constant() const
+    {
+        return constant_;
+    }
+    Variable variable() const
+    {
+        return variable_;
+    }
+    UnaryNumericOp unaryOperator() const
+    {
+        return unaryOperator_;
+    }
+    BinaryNumericOp binaryOperator() const
+    {
+        return binaryOperator_;
+    }
+    RoundingMode roundingMode() const
+    {
+        return roundingMode_;
+    }
+    const TreeExpression& lhs() const;
+    const TreeExpression& rhs() const;
+
+    /// Return an exact affine expression when the tree is affine under
+    /// mathematical integer/real semantics. Floating and nonlinear trees
+    /// deliberately return nullopt and must use a sound backend fallback.
+    std::optional<LinearExpression> asLinear() const;
+
+private:
+    Kind kind_ = Kind::Constant;
+    NumericType type_ = NumericType::real();
+    Rational constant_;
+    Variable variable_;
+    UnaryNumericOp unaryOperator_ = UnaryNumericOp::Negate;
+    BinaryNumericOp binaryOperator_ = BinaryNumericOp::Add;
+    RoundingMode roundingMode_ = RoundingMode::NearestTiesToEven;
+    std::shared_ptr<const TreeExpression> lhs_;
+    std::shared_ptr<const TreeExpression> rhs_;
+};
+
+class TreeConstraint
+{
+public:
+    TreeConstraint(TreeExpression expression, ConstraintKind kind);
+
+    const TreeExpression& expression() const
+    {
+        return expression_;
+    }
+    ConstraintKind kind() const
+    {
+        return kind_;
+    }
+
+private:
+    TreeExpression expression_;
+    ConstraintKind kind_;
+};
+
+struct TreeAssignment
+{
+    Variable target;
+    TreeExpression expression;
+};
+
+using TreeAssignmentList = std::vector<TreeAssignment>;
+
+/// Selects the physical carrier of an Octagon DBM.  This is deliberately not
+/// part of the abstract semantics: states using different carriers may be
+/// combined, compared, and converted without approximation.
+enum class OctagonStorageKind
+{
+    DenseHalf,
+    SparseFinite,
+    ComponentDense
+};
+
+const char* octagonStorageKindName(OctagonStorageKind kind);
+OctagonStorageKind octagonStorageKindFromName(const std::string& name);
+
+struct OctagonConfig
+{
+    bool strongClosure = true;
+    bool integerTightening = true;
+    OctagonStorageKind storage = OctagonStorageKind::DenseHalf;
+    /// ComponentDense only: share component matrices across abstract-state
+    /// copies until the first write. Disabling this keeps identical abstract
+    /// semantics but moves the matrix-copy cost from mutation to clone.
+    bool componentCopyOnWrite = true;
+    /// Use the quadratic single-variable closure repair where its precondition
+    /// holds. Disabling it computes the same canonical state with full closure.
+    bool incrementalClosure = true;
+    std::shared_ptr<DiagnosticSink> diagnostics;
+
+    /// Diagnostics affect observation only, not abstract-state semantics.
+    bool operationCompatible(const OctagonConfig& other) const
+    {
+        return strongClosure == other.strongClosure &&
+               integerTightening == other.integerTightening;
+    }
+};
+
+using Dimension = std::size_t;
+
+struct DimensionEntry
+{
+    Variable variable;
+    explicit DimensionEntry(Variable value) : variable(value) {}
+};
+
+/// Physical coordinates, not a mathematical environment. Every domain denotes
+/// a property over all typed Variables; variables absent here are unrestricted.
+/// Immutable layouts are shared by copies. A relational operation extends or
+/// aligns them internally before touching its matrix.
+class DimensionLayout
+{
+public:
+    DimensionLayout() : DimensionLayout(std::vector<DimensionEntry> {}) {}
+    explicit DimensionLayout(std::vector<DimensionEntry> entries)
+    {
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b)
+        {
+            return a.variable < b.variable;
+        });
+        for (std::size_t i = 1; i < entries.size(); ++i)
+            if (entries[i - 1].variable == entries[i].variable)
+            {
+                assert(false && "duplicate relational coordinate");
+                std::abort();
+            }
+        entries_ = std::make_shared<const std::vector<DimensionEntry>>(std::move(entries));
+    }
+    std::size_t size() const
+    {
+        return entries_->size();
+    }
+    bool empty() const
+    {
+        return entries_->empty();
+    }
+    bool contains(Variable variable) const
+    {
+        const auto it = find(variable);
+        return it != entries_->end() && it->variable == variable;
+    }
+    Dimension dimensionOf(Variable variable) const
+    {
+        const auto it = find(variable);
+        if (it == entries_->end() || it->variable != variable)
+        {
+            assert(false && "missing relational coordinate");
+            std::abort();
+        }
+        return static_cast<Dimension>(it - entries_->begin());
+    }
+    Variable variableOf(Dimension dimension) const
+    {
+        return entries_->at(dimension).variable;
+    }
+    const NumericType& typeOf(Variable variable) const
+    {
+        return entries_->at(dimensionOf(variable)).variable.type();
+    }
+    const std::vector<DimensionEntry>& variables() const
+    {
+        return *entries_;
+    }
+    DimensionLayout add(const std::vector<DimensionEntry>& added) const
+    {
+        auto entries = *entries_;
+        entries.insert(entries.end(), added.begin(), added.end());
+        return DimensionLayout(std::move(entries));
+    }
+    DimensionLayout remove(const std::vector<Variable>& removed) const
+    {
+        std::vector<DimensionEntry> entries;
+        for (const auto& entry : *entries_)
+            if (std::find(removed.begin(), removed.end(), entry.variable) == removed.end())
+                entries.push_back(entry);
+        return DimensionLayout(std::move(entries));
+    }
+    DimensionLayout merge(const DimensionLayout& other) const
+    {
+        if (*this == other)
+            return *this;
+        std::vector<DimensionEntry> entries;
+        std::set_union(entries_->begin(), entries_->end(), other.entries_->begin(), other.entries_->end(),
+                       std::back_inserter(entries), [](const auto& a, const auto& b)
+        {
+            return a.variable < b.variable;
+        });
+        return DimensionLayout(std::move(entries));
+    }
+    friend bool operator==(const DimensionLayout& a, const DimensionLayout& b)
+    {
+        return a.entries_ == b.entries_ || (a.size() == b.size() &&
+                                            std::equal(a.entries_->begin(), a.entries_->end(), b.entries_->begin(),
+                                                    [](const auto& x, const auto& y)
+        {
+            return x.variable == y.variable;
+        }));
+    }
+    friend bool operator!=(const DimensionLayout& a, const DimensionLayout& b)
+    {
+        return !(a == b);
+    }
+
+private:
+    std::vector<DimensionEntry>::const_iterator find(Variable variable) const
+    {
+        return std::lower_bound(entries_->begin(), entries_->end(), variable,
+                                [](const auto& entry, Variable value)
+        {
+            return entry.variable < value;
+        });
+    }
+    std::shared_ptr<const std::vector<DimensionEntry>> entries_;
+};
+
+std::unique_ptr<NumericalDomain> makeNumericalDomain(
+    DomainKind kind, bool bottom, const OctagonConfig& config = {});
+std::unique_ptr<NumericalDomain> makeOctagonDomain(
+    bool bottom = false, const OctagonConfig& config = {});
 
 } // namespace SVF
 

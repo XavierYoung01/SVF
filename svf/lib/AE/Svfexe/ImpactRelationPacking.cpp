@@ -36,16 +36,21 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "AE/Svfexe/ImpactRelationPacking.h"
+#include "AE/Svfexe/AbstractInterpretation.h"
 #include "AE/Core/ImpactPagedGraph.h"
 #include "AE/Svfexe/AllocationSize.h"
 #include "AE/Svfexe/SVFIRAdapter.h"
 #include "Graphs/CallGraph.h"
 #include "MemoryModel/PointerAnalysis.h"
 #include "SVFIR/SVFIR.h"
+#include "Util/Options.h"
 #include <algorithm>
 #include <chrono>
 #include <climits>
 #include <functional>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -66,6 +71,12 @@ std::map<NodeID, std::uintptr_t>& sourceVariableMap()
     return map;
 }
 
+std::set<NodeID>& externalObjectSet()
+{
+    static std::set<NodeID> objects;
+    return objects;
+}
+
 /// A Sparrow PowOctLoc restricted to V. `strong` is can_strong_update_octloc
 /// of the whole location set (exactly one location that allows it).
 struct Locs
@@ -78,7 +89,7 @@ struct Locs
 
 struct Command
 {
-    enum Kind { SetConst, SetVariable, Forget, Assume, Alternatives } kind = Forget;
+    enum Kind { SetConst, SetVariable, Forget, Assume, Alternatives, Parallel } kind = Forget;
     std::vector<Index> lhs, rhs;
     bool strong = false;     // both location sets allow a strong update
     bool weakUpdate = false; // Sparrow update -> Mem.weak_add
@@ -125,6 +136,22 @@ void apply(const Command& command, G& graph)
                 for (Index y : command.rhs)
                     graph.assume(x, y);
         break;
+    case Command::Parallel:
+    {
+        const G before = graph;
+        for (const auto& assignment : command.alternatives.front())
+        {
+            Command step = assignment;
+            if (step.kind == Command::SetVariable)
+                step.rhs.erase(std::remove_if(step.rhs.begin(), step.rhs.end(),
+                                              [&](Index y)
+            {
+                return !before.isDefined(y);
+            }), step.rhs.end());
+            apply(step, graph);
+        }
+        break;
+    }
     case Command::Alternatives:
     {
         G result;
@@ -149,14 +176,15 @@ void applyAll(const Commands& commands, G& graph)
 }
 
 /// The CIL expression a Sparrow command would see for an LLVM value, after
-/// CilHelper.remove_cast and remove_coeff. SSA temporaries of casts,
-/// constant multiplications and +/- constants are looked through.
+/// CilHelper.remove_cast. Direct LLVM arithmetic operands remain variables;
+/// literal multiplication does not carry CIL sizeof-expression provenance.
 struct Expr
 {
     enum Kind { NonIntegral, Const, Var, VarPlusConst, AddVars, SubVars, Complex } kind = Complex;
     const SVFVar* var = nullptr;
     const SVFVar* var2 = nullptr;
     bool plusOne = false;
+    std::optional<Locs> sourceLocations;
 };
 
 enum class Op { Lt, Le, Gt, Ge, Eq, Ne };
@@ -229,9 +257,19 @@ const T* orNull(const U* value)
 const SVFStmt* definition(const SVFVar* value)
 {
     const auto* variable = SVFUtil::dyn_cast<ValVar>(value);
-    if (!variable || variable->getInEdges().size() != 1)
+    if (!variable)
         return nullptr;
-    return *variable->getInEdges().begin();
+    const SVFStmt* result = nullptr;
+    for (const SVFStmt* statement : variable->getInEdges())
+    {
+        // A store writes through its pointer; it does not define that pointer.
+        if (SVFUtil::isa<StoreStmt>(statement))
+            continue;
+        if (result)
+            return nullptr;
+        result = statement;
+    }
+    return result;
 }
 
 bool integral(const SVFVar* value)
@@ -270,11 +308,21 @@ void ImpactRelationPacking::setSourceVariables(std::map<NodeID, std::uintptr_t> 
     sourceVariableMap() = std::move(sourceVariables);
 }
 
+void ImpactRelationPacking::setExternalObjects(std::set<NodeID> objects)
+{
+    externalObjectSet() = std::move(objects);
+}
+
+bool ImpactRelationPacking::isExternalObject(NodeID object)
+{
+    return externalObjectSet().count(object) != 0;
+}
+
 ImpactRelationPacking::ImpactRelationPacking(SVFIR& ir, const SVFIRAdapter& adapter,
         PointerAnalysis& pointsTo, std::vector<const ICFGNode*> entries,
-        const AllocationSizeModel* sizes)
+        const AllocationSizeModel* sizes, const AbstractInterpretation* intervals)
     : ir_(ir), adapter_(adapter), pointsTo_(pointsTo), entries_(std::move(entries)),
-      sizes_(sizes)
+      sizes_(sizes), intervals_(intervals)
 {
     if (!sizes_)
     {
@@ -304,8 +352,87 @@ ImpactPackingResult ImpactRelationPacking::pack(const std::vector<Var>& vocabula
             return std::nullopt;
         return found->second;
     };
+    const char* importPath = std::getenv("SVF_SPARROW_PACK_IMPORT");
+    const char* exportPath = std::getenv("SVF_SPARROW_VOCAB_EXPORT");
+    if (importPath || exportPath)
+    {
+        if (Options::AEQueryInputID().empty())
+            throw std::invalid_argument("native packing requires an input identity");
+        if (importPath && exportPath)
+            throw std::invalid_argument("native packing import and vocabulary export are exclusive");
+        std::ostringstream context;
+        context << "SVF_NATIVE_PACK_V1\n" << std::quoted(Options::AEQueryInputID())
+                << '\n' << universe.size() << '\n';
+        for (Var variable : universe)
+        {
+            const auto* value = adapter_.value(variable);
+            const auto* content = adapter_.contentObject(variable);
+            const auto* size = adapter_.sizeObject(variable);
+            const SVFVar* origin = value ? static_cast<const SVFVar*>(value)
+                                  : content ? static_cast<const SVFVar*>(content)
+                                  : static_cast<const SVFVar*>(size);
+            if (!origin)
+                throw std::invalid_argument("native packing has an unmapped vocabulary member");
+            context << variable.id() << ' ' << (value ? "value" : content ? "content" : "size")
+                    << ' ' << origin->getId() << ' ' << std::quoted(origin->toString()) << '\n';
+        }
+        if (exportPath)
+        {
+            if (!std::getenv("SVF_AE_PACK_ONLY"))
+                throw std::invalid_argument("vocabulary export requires pack-only mode");
+            std::ofstream output(exportPath);
+            output << context.str();
+            if (!output)
+                throw std::invalid_argument("cannot write native packing vocabulary");
+            ImpactPackingResult result;
+            result.packs = connectedComponentPacking(vocabulary, {});
+            return result;
+        }
+        std::ifstream input(importPath, std::ios::binary);
+        const std::string expected = context.str();
+        std::string supplied(expected.size(), '\0');
+        input.read(supplied.data(), supplied.size());
+        if (!input || supplied != expected)
+            throw std::invalid_argument("native packing input or vocabulary identity mismatch");
+        std::string marker;
+        std::size_t count = 0;
+        if (!(input >> marker >> count) || marker != "PACKS" || count > universe.size())
+            throw std::invalid_argument("invalid native packing header");
+        ImpactPackingResult result;
+        std::set<std::uint32_t> assigned;
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            std::size_t members = 0;
+            if (!(input >> members) || members < 2 || members > universe.size())
+                throw std::invalid_argument("invalid native packing size");
+            std::vector<Var> pack;
+            for (std::size_t j = 0; j < members; ++j)
+            {
+                std::uint32_t id = 0;
+                if (!(input >> id) || !coordinates.count(id) || !assigned.insert(id).second)
+                    throw std::invalid_argument("unknown or overlapping native packing member");
+                pack.push_back(universe.at(coordinates.at(id)));
+            }
+            std::sort(pack.begin(), pack.end());
+            for (std::size_t j = 1; j < pack.size(); ++j)
+                result.edges.emplace_back(pack.front(), pack[j]);
+            result.packs.push_back(std::move(pack));
+        }
+        input >> std::ws;
+        if (!input.eof())
+            throw std::invalid_argument("trailing native packing data");
+        for (Var variable : universe)
+            if (!assigned.count(variable.id()))
+                result.packs.push_back({variable});
+        std::sort(result.packs.begin(), result.packs.end());
+        result.extractionSeconds = std::chrono::duration<double>(Clock::now() - start).count();
+        std::cerr << "AE_NATIVE_PACK_IMPORT packs=" << count
+                  << " variables=" << assigned.size() << " preanalysis_executed=0\n";
+        return result;
+    }
     const bool diagnostics = std::getenv("SVF_IMPACT_DIAGNOSTICS") != nullptr;
-    const bool assertQueries = std::getenv("SVF_IMPACT_ASSERT_QUERIES") != nullptr;
+    const bool assertQueries = Options::AESVComp() ||
+                               std::getenv("SVF_IMPACT_ASSERT_QUERIES") != nullptr;
     ImpactPackingResult result;
     ICFG* icfg = ir_.getICFG();
 
@@ -341,10 +468,28 @@ ImpactPackingResult ImpactRelationPacking::pack(const std::vector<Var>& vocabula
         locs.strong = !recursive(value->getFunction());
         return locs;
     };
-    const auto pointees = [&](const SVFVar* pointer)
+    const auto pointees = [&](const SVFVar* pointer, const ICFGNode* node,
+                               const SVFStmt* statement = nullptr)
     {
         std::vector<const ObjVar*> objects;
-        for (NodeID id : pointsTo_.getPts(pointer->getId()))
+        if (intervals_)
+        {
+            const auto* state = statement ? intervals_->intervalInputState(statement)
+                                : intervals_->intervalInputState(node);
+            const auto* value = SVFUtil::dyn_cast<ValVar>(pointer);
+            if (!state || !value || !intervals_->adapter_.contains(*value))
+                return objects;
+            const auto addresses = state->addressSet(intervals_->adapter_.variable(*value));
+            if (addresses.isFinite())
+                for (const auto location : addresses.locations())
+                {
+                    const auto* object = intervals_->objectAt(location);
+                    const auto* base = object ? ir_.getBaseObject(object->getId()) : nullptr;
+                    if (base && !base->isBlackHoleObj() && !SVFUtil::isa<ConstNullPtrObjVar>(base))
+                        objects.push_back(object);
+                }
+        }
+        else for (NodeID id : pointsTo_.getPts(pointer->getId()))
         {
             const auto* object = SVFUtil::dyn_cast<ObjVar>(ir_.getGNode(id));
             const BaseObjVar* base = object ? ir_.getBaseObject(id) : nullptr;
@@ -352,6 +497,15 @@ ImpactPackingResult ImpactRelationPacking::pack(const std::vector<Var>& vocabula
                     SVFUtil::isa<ConstNullPtrObjVar>(base) || id == ir_.getNullPtr())
                 continue;
             objects.push_back(object);
+        }
+        if (diagnostics)
+        {
+            std::cerr << "IMPACT_POINT_TARGETS node=" << node->getId()
+                << " pointer=" << pointer->getId()
+                << " facts=" << (intervals_ ? "flow-sensitive" : "andersen") << " objects=";
+            for (const auto* object : objects)
+                std::cerr << object->getId() << ',';
+            std::cerr << '\n';
         }
         return objects;
     };
@@ -370,10 +524,10 @@ ImpactPackingResult ImpactRelationPacking::pack(const std::vector<Var>& vocabula
             return true;
         return SVFUtil::isa<StackObjVar>(base) && !recursive(base->getFunction());
     };
-    const auto contentLocs = [&](const SVFVar* pointer)
+    const auto contentLocs = [&](const SVFVar* pointer, const SVFStmt* statement)
     {
         Locs locs;
-        const auto objects = pointees(pointer);
+        const auto objects = pointees(pointer, statement->getICFGNode(), statement);
         locs.strong = objects.size() == 1 && strongObject(objects.front());
         for (const auto* object : objects)
         {
@@ -391,22 +545,20 @@ ImpactPackingResult ImpactRelationPacking::pack(const std::vector<Var>& vocabula
         return std::nullopt;
         return coordinate(adapter_.sizeVariable(*base));
     };
-const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
+    const auto sizeLocsOfPointer = [&](const SVFVar* pointer, const ICFGNode* node)
     {
         // ItvDom.Val.allocsites_of_val |> PowOctLoc.of_sizes
         Locs locs;
         std::set<const BaseObjVar*> bases;
-        for (const auto* object : pointees(pointer))
+        for (const auto* object : pointees(pointer, node))
             bases.insert(ir_.getBaseObject(object->getId()));
-        std::size_t count = 0;
         for (const auto* base : bases)
             if (sizes_->find(base))
             {
-                ++count;
                 if (const auto symbol = sizeOf(base))
                     locs.vars.push_back(*symbol);
             }
-        locs.strong = count == 1;
+        locs.strong = bases.size() == 1;
         return locs;
     };
     const auto sourceVariable = [&](const SVFVar* value) -> std::uintptr_t
@@ -431,10 +583,6 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
             const auto* rhsConstant = SVFUtil::dyn_cast<ConstIntValVar>(rhs);
             const bool oneConstant = (lhsConstant != nullptr) != (rhsConstant != nullptr);
             const auto opcode = binary->getOpcode();
-            if (opcode == BinaryOPStmt::Mul && oneConstant)
-                return expr(lhsConstant ? rhs : lhs, depth + 1);
-            if (opcode == BinaryOPStmt::Shl && rhsConstant && !lhsConstant)
-                return expr(lhs, depth + 1);
             if ((opcode == BinaryOPStmt::Add || opcode == BinaryOPStmt::Sub) && oneConstant)
             {
                 const Expr other = expr(lhsConstant ? rhs : lhs, depth + 1);
@@ -487,18 +635,6 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
         e.var = value;
         return e;
     };
-    const auto stripIntegerCasts = [&](const SVFVar* value)
-    {
-        for (unsigned step = 0; step < 8; ++step)
-        {
-            const auto* copy = orNull<CopyStmt>(definition(value));
-            if (!copy || !integerCast(copy))
-                break;
-            value = copy->getRHSVar();
-        }
-        return value;
-    };
-
     // ---- commands (octImpactSem.set / forget / prune) ----
     const auto setVariable = [](const Locs& lv, const Locs& rv, bool weak)
     {
@@ -525,20 +661,32 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
                          (sourceVariable(lv.value) && sourceVariable(lv.value) == sourceVariable(source))))
             return true; // SVF: SSA names of one source variable (mem2reg).
         if (const auto* load = orNull<LoadStmt>(definition(source)))
-            for (const auto* object : pointees(load->getRHSVar()))
+            for (const auto* object : pointees(load->getRHSVar(), load->getICFGNode(), load))
                 if (lv.objects.count(object->getId()))
                     return true; // SVF: *p = *p + 1 through a load temporary.
         return false;
     };
-    // Sparrow's x := x +/- c for a memory location: LLVM spells g = g + 1 as
-    // t = load g; t2 = t + 1; store t2, g. Identify the location through the
-    // stored value's definition so the store forgets as in octImpactSem.set.
-    const auto storeExpr = [&](const Locs& lv, const SVFVar* value) -> Expr
+    // Preserve source memory locations across load/arithmetic/store lowering.
+    const auto storeExpr = [&](const StoreStmt* store) -> Expr
     {
+        const SVFVar* value = store->getRHSVar();
         const Expr direct = expr(value, 0);
         if (direct.kind != Expr::Var)
             return direct;
-        const auto* binary = orNull<BinaryOPStmt>(definition(stripIntegerCasts(value)));
+        const auto expressionSource = [&](const SVFVar* source) -> const SVFVar*
+        {
+            std::set<const SVFVar*> seen;
+            while (source && !sourceVariable(source) && seen.insert(source).second)
+            {
+                const auto* copy = orNull<CopyStmt>(definition(source));
+                if (!copy || !integerCast(copy))
+                    return source;
+                source = copy->getRHSVar();
+            }
+            return nullptr;
+        };
+        const SVFVar* calculated = expressionSource(value);
+        const auto* binary = calculated ? orNull<BinaryOPStmt>(definition(calculated)) : nullptr;
         if (!binary || (binary->getOpcode() != BinaryOPStmt::Add &&
                         binary->getOpcode() != BinaryOPStmt::Sub))
             return direct;
@@ -547,19 +695,22 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
         if ((lhsConstant != nullptr) == (rhsConstant != nullptr))
             return direct;
         const SVFVar* loaded =
-        stripIntegerCasts(lhsConstant ? binary->getOpVar(1) : binary->getOpVar(0));
-        const auto* load = orNull<LoadStmt>(definition(loaded));
+        expressionSource(lhsConstant ? binary->getOpVar(1) : binary->getOpVar(0));
+        const auto* load = loaded ? orNull<LoadStmt>(definition(loaded)) : nullptr;
         if (!load)
             return direct;
-        bool sameLocation = false;
-        for (const auto* object : pointees(load->getRHSVar()))
-            sameLocation |= lv.objects.count(object->getId()) != 0;
-        if (!sameLocation)
+        const ICFGNode* node = store->getICFGNode();
+        if (load->getICFGNode()->getBB() != node->getBB() || node->getInEdges().size() != 1)
+            return direct;
+        const auto* edge = SVFUtil::dyn_cast<IntraCFGEdge>(*node->getInEdges().begin());
+        if (!edge || edge->getCondition() ||
+                !SVFIRAdapter::loadedMemoryStillCurrent(load, edge->getSrcNode()))
             return direct;
         const s64_t constant = (lhsConstant ? lhsConstant : rhsConstant)->getSExtValue();
         Expr increment;
         increment.kind = Expr::VarPlusConst;
         increment.var = loaded;
+        increment.sourceLocations = contentLocs(load->getRHSVar(), load);
         increment.plusOne = (binary->getOpcode() == BinaryOPStmt::Add && constant == 1) ||
         (binary->getOpcode() == BinaryOPStmt::Sub && constant == -1);
         return increment;
@@ -584,18 +735,17 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
             out.push_back(setVariable(lv, valueLocs(e.var), weak));
             return;
         case Expr::VarPlusConst:
-            if (overlaps(lv, e.var))
+        {
+            const Locs rhs = e.sourceLocations ? *e.sourceLocations : valueLocs(e.var);
+            const bool overlap = e.sourceLocations
+                ? std::any_of(lv.vars.begin(), lv.vars.end(), [&](Index x)
             {
-                if (e.plusOne)
-                    out.push_back(forget(lv, weak));
-                else if (lv.value)
-                    // SVF: x := x - c over two SSA names; CIL would be a no-op
-                    // on one variable, the closest SSA effect is a copy.
-                    out.push_back(setVariable(lv, valueLocs(e.var), weak));
-                return; // memory: set_variable x x is the identity
-            }
-            out.push_back(setVariable(lv, valueLocs(e.var), weak));
+                return std::find(rhs.vars.begin(), rhs.vars.end(), x) != rhs.vars.end();
+            }) : overlaps(lv, e.var);
+            out.push_back(e.plusOne && overlap ? forget(lv, weak)
+                          : setVariable(lv, rhs, weak));
             return;
+        }
         default:
             out.push_back(forget(lv, weak));
             return;
@@ -685,6 +835,27 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
         {
             if (const auto* address = SVFUtil::dyn_cast<AddrStmt>(statement))
             {
+                const auto* object = SVFUtil::dyn_cast<ObjVar>(address->getRHSVar());
+                const auto* base = object ? ir_.getBaseObject(object->getId()) : nullptr;
+                if (base && isExternalObject(base->getId()))
+                {
+                    Locs locations;
+                    const auto append = [&](const ObjVar* content)
+                    {
+                        if (content && !content->isPointer())
+                            if (const auto symbol = coordinate(adapter_.contentVariable(*content)))
+                                locations.vars.push_back(*symbol);
+                    };
+                    append(object);
+                    for (NodeID id : ir_.getAllFieldsObjVars(base->getId()))
+                        append(SVFUtil::dyn_cast<ObjVar>(ir_.getGNode(id)));
+                    if (const auto symbol = sizeOf(base))
+                        locations.vars.push_back(*symbol);
+                    std::sort(locations.vars.begin(), locations.vars.end());
+                    locations.vars.erase(std::unique(locations.vars.begin(), locations.vars.end()), locations.vars.end());
+                    commands.push_back(forget(locations, weak));
+                    continue;
+                }
                 // Calloc / Csalloc / realloc / calloc / strdup: Size(a) := e
                 const AllocationSize* size = sizes_->find(address);
                 if (!size)
@@ -694,7 +865,7 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
                 if (const auto symbol = sizeOf(size->object))
                     lv.vars.push_back(*symbol);
                 if (size->sizeSourcePointer)
-                    commands.push_back(setVariable(lv, sizeLocsOfPointer(size->sizeSourcePointer), weak));
+                    commands.push_back(setVariable(lv, sizeLocsOfPointer(size->sizeSourcePointer, node), weak));
                 else if (!size->known)
                     commands.push_back(forget(lv, weak));
                 else if (!size->sizeValue)
@@ -710,12 +881,12 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
             {
                 if (integral(load->getLHSVar()))
                     commands.push_back(setVariable(valueLocs(load->getLHSVar()),
-                                                   contentLocs(load->getRHSVar()), weak));
+                                                   contentLocs(load->getRHSVar(), load), weak));
             }
             else if (const auto* store = SVFUtil::dyn_cast<StoreStmt>(statement))
             {
-                const Locs target = contentLocs(store->getLHSVar());
-                compileSet(target, storeExpr(target, store->getRHSVar()), weak, commands);
+                const Locs target = contentLocs(store->getLHSVar(), store);
+                compileSet(target, storeExpr(store), weak, commands);
             }
             else if (const auto* select = SVFUtil::dyn_cast<SelectStmt>(statement))
             {
@@ -752,15 +923,19 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
                     calls.push_back(callEdge);
             const bool several = calls.size() > 1;
             for (const auto* edge : calls)
-                for (const auto* binding : edge->getCallPEs())
-                    for (u32_t i = 0; i < binding->getOpVarNum(); ++i)
-                        if (binding->getOpCallICFGNode(i) == call && integral(binding->getRes()))
-                        {
-                            Locs formal = valueLocs(binding->getRes());
-                            if (several)
-                                formal.strong = false;
-                            compileSet(formal, expr(binding->getOpVar(i), 0), weak || several, commands);
-                        }
+            {
+                const auto* entry = SVFUtil::cast<FunEntryICFGNode>(edge->getDstNode());
+                const auto& formals = entry->getFormalParms();
+                const auto& actuals = call->getActualParms();
+                for (std::size_t i = std::min(formals.size(), actuals.size()); i > 0; --i)
+                    if (integral(formals[i - 1]))
+                    {
+                        Locs formal = valueLocs(formals[i - 1]);
+                        if (several)
+                            formal.strong = false;
+                        compileSet(formal, expr(actuals[i - 1], 0), weak || several, commands);
+                    }
+            }
         }
         if (const auto* ret = SVFUtil::dyn_cast<RetICFGNode>(node))
         {
@@ -778,7 +953,7 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
                 {
                     const Locs lv = valueLocs(result);
                     commands.push_back(forget(lv, weak));
-                    const Locs sizes = sizeLocsOfPointer(call->getArgument(0));
+                    const Locs sizes = sizeLocsOfPointer(call->getArgument(0), call);
                     Command command;
                     command.kind = Command::Assume;
                     command.lhs = lv.vars;
@@ -801,7 +976,15 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
             {
                 const Locs argc = valueLocs(formals[0]);
                 commands.push_back(forget(argc, weak));
-                commands.push_back(setVariable(sizeLocsOfPointer(formals[1]), argc, weak));
+                commands.push_back(setVariable(sizeLocsOfPointer(formals[1], entry), argc, weak));
+                if (const auto main = AllocationSizeModel::mainArguments(ir_); main && main->strings)
+                {
+                    Locs stringSize;
+                    stringSize.strong = true;
+                    if (const auto symbol = sizeOf(main->strings))
+                        stringSize.vars.push_back(*symbol);
+                    commands.push_back(forget(stringSize, weak));
+                }
             }
         }
         commandCount += commands.size();
@@ -834,7 +1017,9 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
             continue;
         // SVF: a phi is the CIL assignment on its incoming edge. Without a
         // direct edge, fall back to the join of the alternatives at the node.
-        const ICFGNode* target = phi->getICFGNode();
+        const SVFBasicBlock* block = phi->getICFGNode()->getBB();
+        const ICFGNode* target = block && !block->getICFGNodeList().empty()
+                                 ? block->getICFGNodeList().front() : phi->getICFGNode();
         bool direct = true;
         for (u32_t i = 0; i < phi->getOpVarNum(); ++i)
             direct &= icfg->hasIntraICFGEdge(const_cast<ICFGNode*>(phi->getOpICFGNode(i)),
@@ -864,23 +1049,35 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
         for (u32_t i = 0; i < phi->getOpVarNum(); ++i)
         {
             const ICFGNode* from = phi->getOpICFGNode(i);
+            auto& commands = edgeCommands[ {from, target}];
+            if (commands.empty() || commands.back().kind != Command::Parallel)
+            {
+                Command group;
+                group.kind = Command::Parallel;
+                group.alternatives.resize(1);
+                commands.push_back(std::move(group));
+            }
             compileSet(valueLocs(phi->getRes()), expr(phi->getOpVar(i), 0), weakAt(target),
-                       edgeCommands[ {from, target}]);
+                       commands.back().alternatives.front());
         }
     }
     for (auto it = icfg->begin(); it != icfg->end(); ++it)
         for (const auto* edge : it->second->getOutEdges())
             if (const auto* intra = SVFUtil::dyn_cast<IntraCFGEdge>(edge))
                 if (intra->getCondition() && !intra->isSwitchEdge())
-                    if (const auto* cmp = orNull<CmpStmt>(definition(intra->getCondition())))
-                    {
-                        // Cassume runs before the phi assignments of the edge.
-                        Commands prune;
-                        compilePrune(cmp, intra->getSuccessorCondValue() != 0,
-                                     weakAt(edge->getSrcNode()), prune);
-                        auto& slot = edgeCommands[ {edge->getSrcNode(), edge->getDstNode()}];
-                        slot.insert(slot.begin(), prune.begin(), prune.end());
-                    }
+                {
+                    bool taken = intra->getSuccessorCondValue() != 0;
+                    const auto* cmp = orNull<CmpStmt>(definition(
+                                                          SVFIRAdapter::booleanCondition(intra->getCondition(), taken)));
+                    if (!cmp)
+                        continue;
+                    // Cassume runs before the phi assignments of the edge.
+                    Commands prune;
+                    compilePrune(cmp, taken,
+                                 weakAt(edge->getSrcNode()), prune);
+                    auto& slot = edgeCommands[ {edge->getSrcNode(), edge->getDstNode()}];
+                    slot.insert(slot.begin(), prune.begin(), prune.end());
+                }
     result.commands = commandCount;
 
     if (std::getenv("SVF_IMPACT_DUMP_COMMANDS"))
@@ -897,7 +1094,7 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
                 return "s:" + object->getName();
             return std::string("?");
         };
-        const char* kinds[] = {"const", "set", "forget", "assume", "alternatives"};
+        const char* kinds[] = {"const", "set", "forget", "assume", "alternatives", "parallel"};
         std::function<void(const Command&, const std::string&)> dump =
             [&](const Command& command, const std::string& where)
         {
@@ -1042,25 +1239,95 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
     const std::vector<SVF::ImpactPagedGraph> inputs = fixpoint(SVF::ImpactPagedGraph{}, result.transfers);
     result.preanalysisSeconds = std::chrono::duration<double>(Clock::now() - start).count();
 
+    const auto intervalAt = [&](const SVFVar* variable, const ICFGNode* node)
+    {
+        if (const auto* literal = SVFUtil::dyn_cast<ConstIntValVar>(variable))
+            return SVF::Interval::singleton(SVF::Rational(literal->getSExtValue()));
+        const auto* value = SVFUtil::dyn_cast<ValVar>(variable);
+        const auto* state = intervals_ ? intervals_->intervalInputState(node) : nullptr;
+        if (!state || !value || !intervals_->adapter_.contains(*value))
+            return SVF::Interval::top();
+        return state->interval(intervals_->adapter_.variable(*value));
+    };
+    const auto pointerObjectsAt = [&](const SVFVar* pointer, const ICFGNode* node)
+    {
+        return pointees(pointer, node);
+    };
+    const auto eligible = [&](const ICFGNode* node, const SVFVar* pointer,
+                               const SVF::Interval& displacement)
+    {
+        if (!intervals_)
+            return true;
+        const auto* state = intervals_->intervalInputState(node);
+        if (!state)
+            return false;
+        std::set<const BaseObjVar*> bases;
+        for (const auto* object : pointerObjectsAt(pointer, node))
+            bases.insert(ir_.getBaseObject(object->getId()));
+        if (bases.size() != 1 || !sizes_->find(*bases.begin()))
+            return false;
+        const auto size = state->interval(intervals_->adapter_.sizeVariable(**bases.begin()));
+        const auto offset = SVF::add(intervals_->intervalPointerOffset(pointer, *state), displacement);
+        const bool accepted = !size.isBottom() && size.lower().isFinite() &&
+            size.lower().value() > SVF::Rational(0) && !offset.isBottom() &&
+            offset.lower().isFinite() && offset.lower().value() >= SVF::Rational(0);
+        if (diagnostics)
+            std::cerr << "IMPACT_INTERVAL_GATE node=" << node->getId()
+                << " pointer=" << pointer->getId() << " size=" << size.toString()
+                << " offset=" << offset.toString() << " accepted=" << accepted << '\n';
+        return accepted;
+    };
+
     // ---- octImpactAnalysis.inspect_alarm ----
     const auto extractionStart = Clock::now();
     std::set<SVF::RelationEdge> selected;
     const auto collect = [&](const ICFGNode* node, const char* kind,
                              std::optional<Index> size, std::optional<Index> index,
-                             const SVF::ImpactPagedGraph* at = nullptr)
+                             const SVF::ImpactPagedGraph* at = nullptr, bool intervalEligible = true)
     {
         const SVF::ImpactPagedGraph& graph = at ? *at : inputs[node->getId()];
-        const bool supported = size && index;
-        const bool promising = supported && !graph.bottom && graph.hasPath(*size, *index);
+        const bool components = Options::AEImpactQueryComponents();
+        const bool supported = components ? bool(size || index) : bool(size && index);
+        std::set<Index> retained;
+        if (components && supported && !graph.bottom)
+        {
+            std::map<Index, std::vector<Index>> adjacent;
+            for (const auto& edge : graph.edges())
+            {
+                adjacent[edge.first].push_back(edge.second);
+                adjacent[edge.second].push_back(edge.first);
+            }
+            std::vector<Index> pending;
+            if (size)
+                pending.push_back(*size);
+            if (index)
+                pending.push_back(*index);
+            while (!pending.empty())
+            {
+                const Index variable = pending.back();
+                pending.pop_back();
+                if (retained.insert(variable).second)
+                    for (Index neighbour : adjacent[variable])
+                        pending.push_back(neighbour);
+            }
+        }
+        const bool promising = intervalEligible && supported && !graph.bottom &&
+                               (components || graph.hasPath(*size, *index));
         if (diagnostics)
             std::cerr << "IMPACT_DIAG_QUERY node=" << node->getId() << " kind=" << kind
                       << " reachable=" << !graph.bottom << " edges=" << graph.edges().size()
                       << " defined=" << graph.defined().size() << " supported=" << supported
-                      << " promising=" << promising << '\n';
+                      << " promising=" << promising
+                      << " interval_eligible=" << intervalEligible
+                      << " size_location=" << (size ? std::to_string(*size) : "none")
+                      << " index_location=" << (index ? std::to_string(*index) : "none")
+                      << '\n';
         ImpactPackingQuery query{node->getId(), kind, supported, promising, {}};
         if (promising)
             for (const auto& edge : graph.edges())
             {
+                if (components && !retained.count(edge.first))
+                    continue;
                 const SVF::RelationEdge variables{universe[edge.first], universe[edge.second]};
                 query.snapshot.push_back(variables);
                 selected.insert(variables);
@@ -1074,14 +1341,15 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
         if (diagnostics)
             std::cerr << "IMPACT_DIAG_INDEX value=" << value->getId() << " kind=" << e.kind << '\n';
         if (e.kind != Expr::Var && e.kind != Expr::VarPlusConst)
-            return std::nullopt;
+            return Options::AEImpactQueryComponents() && !SVFUtil::isa<ConstIntValVar>(value)
+                   ? numeric(value) : std::nullopt;
         return numeric(e.var);
     };
-    const auto singleSize = [&](const SVFVar* pointer) -> std::optional<Index>
+    const auto singleSize = [&](const SVFVar* pointer, const ICFGNode* node) -> std::optional<Index>
     {
         // ArrayBlk.cardinal arr = 1: a single allocation site.
         std::set<const BaseObjVar*> bases;
-        for (const auto* object : pointees(pointer))
+        for (const auto* object : pointerObjectsAt(pointer, node))
             bases.insert(ir_.getBaseObject(object->getId()));
         if (diagnostics)
         {
@@ -1104,10 +1372,31 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
     {
         const ICFGNode* node = it->second;
         for (const SVFStmt* statement : node->getSVFStmts())
-            if (const auto* gep = SVFUtil::dyn_cast<GepStmt>(statement))
+        {
+            const auto* load = SVFUtil::dyn_cast<LoadStmt>(statement);
+            const auto* store = SVFUtil::dyn_cast<StoreStmt>(statement);
+            const SVFVar* pointer = load ? load->getRHSVar() : store ? store->getLHSVar() : nullptr;
+            const auto* gep = pointer ? orNull<GepStmt>(definition(pointer)) : nullptr;
+            if (intervals_ && gep)
+            {
+                const auto* accessed = load ? load->getLHSVar()->getType() : store->getRHSVar()->getType();
                 for (const auto& part : gep->getOffsetVarAndGepTypePairVec())
                     if (!SVFUtil::isa<ConstIntValVar>(part.first))
-                        collect(node, "array-index", singleSize(gep->getRHSVar()), indexOf(part.first));
+                    {
+                        const auto* array = SVFUtil::dyn_cast<SVFArrayType>(part.second);
+                        const auto* element = array ? array->getTypeOfElement()
+                            : gep->getAccessPath().gepSrcPointeeType();
+                        collect(node, "array-access", singleSize(pointer, node),
+                            accessed == element ? indexOf(part.first) : std::nullopt, nullptr,
+                            eligible(node, pointer, SVF::Interval::singleton(SVF::Rational(0))));
+                    }
+            }
+            else if (!intervals_)
+                if (const auto* formation = SVFUtil::dyn_cast<GepStmt>(statement))
+                    for (const auto& part : formation->getOffsetVarAndGepTypePairVec())
+                        if (!SVFUtil::isa<ConstIntValVar>(part.first))
+                            collect(node, "array-index", singleSize(formation->getRHSVar(), node), indexOf(part.first));
+        }
         const auto* call = SVFUtil::dyn_cast<CallICFGNode>(node);
         const FunObjVar* callee = call ? call->getCalledFunction() : nullptr;
         if (!callee)
@@ -1115,40 +1404,78 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
         const std::string name = callee->getName();
         if (isMemcpyLike(name) && call->arg_size() >= 3)
         {
-            collect(node, "memcpy-length", singleSize(call->getArgument(0)), indexOf(call->getArgument(2)));
+            collect(node, "memcpy-length", singleSize(call->getArgument(0), node), indexOf(call->getArgument(2)),
+                nullptr, eligible(node, call->getArgument(0), SVF::add(intervalAt(call->getArgument(2), node),
+                    SVF::Interval::singleton(SVF::Rational(1)))));
             // Sparrow inspect_aexp passes the pointer expression e2 for the
             // source query, which cannot name an integral index location.
-            collect(node, "memcpy-source", singleSize(call->getArgument(1)), std::nullopt);
+            collect(node, "memcpy-source", singleSize(call->getArgument(1), node), std::nullopt);
         }
         // Sparrow passes v2exp=None for these two string kinds; they never
         // select an impact snapshot, but remain in the query inventory.
         if ((name == "strcpy" || name == "strcat") && call->arg_size() >= 2)
-            collect(node, name.c_str(), singleSize(call->getArgument(0)), std::nullopt);
+            collect(node, name.c_str(), singleSize(call->getArgument(0), node), std::nullopt);
         if (!assertQueries)
             continue;
-        // Off by default (D-005): assertions are not Sparrow alarm
-        // expressions. The operands of a supported comparison are related
-        // if the graph before the check has a path in either direction.
-        const auto assertion = [&](const CmpStmt* cmp, const char* kind,
-                                   const SVF::ImpactPagedGraph& graph)
+        // Assertion demands use the state before the check's branch refinement.
+        const auto assertionLeaf = [&](const SVFVar* condition, const char* kind,
+                                       const SVF::ImpactPagedGraph& graph)
         {
+            bool taken = true;
+            const auto* cmp = orNull<CmpStmt>(definition(
+                                                  SVFIRAdapter::booleanCondition(condition, taken)));
             const auto op = cmp ? comparison(cmp->getPredicate()) : std::nullopt;
             std::optional<Index> lhs, rhs;
-            if (op && *op != Op::Ne)
+            if (op && (Options::AEImpactQueryComponents() || *op != Op::Ne))
             {
                 lhs = indexOf(cmp->getOpVar(0));
                 rhs = indexOf(cmp->getOpVar(1));
             }
+            else if (Options::AEImpactQueryComponents() && !cmp)
+                lhs = indexOf(condition);
             if (lhs && rhs && !graph.bottom && graph.hasPath(*rhs, *lhs))
                 collect(node, kind, rhs, lhs, &graph);
             else
                 collect(node, kind, lhs, rhs, &graph);
         };
+        const auto assertion = [&](const SVFVar* condition, const char* kind,
+                                   const SVF::ImpactPagedGraph& graph)
+        {
+            std::vector<const SVFVar*> pending{condition};
+            std::set<const SVFVar*> seen;
+            while (!pending.empty())
+            {
+                bool taken = true;
+                const auto* value = SVFIRAdapter::booleanCondition(pending.back(), taken);
+                pending.pop_back();
+                if (!value || !seen.insert(value).second)
+                    continue;
+                const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(value->getType());
+                const SVFStmt* def = definition(value);
+                if (type && type->isBoolean() && def &&
+                        (SVFUtil::isa<PhiStmt>(def) || SVFUtil::isa<SelectStmt>(def)))
+                {
+                    for (const auto* operand : SVFUtil::cast<MultiOpndStmt>(def)->getOpndVars())
+                        pending.push_back(operand);
+                }
+                else if (const auto* binary = orNull<BinaryOPStmt>(def);
+                         type && type->isBoolean() && binary &&
+                         (binary->getOpcode() == BinaryOPStmt::And || binary->getOpcode() == BinaryOPStmt::Or))
+                {
+                    pending.push_back(binary->getOpVar(0));
+                    pending.push_back(binary->getOpVar(1));
+                }
+                else if (!SVFUtil::isa<ConstIntValVar>(value))
+                    assertionLeaf(value, kind, graph);
+            }
+        };
         if (name == "svf_assert" && call->arg_size())
-            assertion(orNull<CmpStmt>(definition(call->getArgument(0))), "assert-condition",
+            assertion(call->getArgument(0), "assert-condition",
                       inputs[node->getId()]);
         else if (name == "__assert_fail" || name == "__assert_rtn" ||
-                 name == "__assert_func" || name == "__assert2")
+                 name == "__assert_func" || name == "__assert2" ||
+                 (Options::AESVComp() &&
+                  (name == "reach_error" || name == "__VERIFIER_error")))
         {
             // The guards on the paths into the failure block, read before the
             // branch prunes them.
@@ -1164,7 +1491,7 @@ const auto sizeLocsOfPointer = [&](const SVFVar* pointer)
                     if (const auto* intra = SVFUtil::dyn_cast<IntraCFGEdge>(edge))
                     {
                         if (intra->getCondition() && !intra->isSwitchEdge())
-                            assertion(orNull<CmpStmt>(definition(intra->getCondition())),
+                            assertion(intra->getCondition(),
                                       "standard-assert-failure", inputs[edge->getSrcNode()->getId()]);
                         else
                             pending.push_back(edge->getSrcNode());

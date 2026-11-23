@@ -23,6 +23,8 @@
 
 #include "AE/Core/OctagonDomain.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -30,7 +32,6 @@
 #include <optional>
 #include <set>
 #include <sstream>
-#include <stdexcept>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -144,7 +145,8 @@ public:
         case OctagonStorageKind::ComponentDense:
             return componentAt(row, column);
         }
-        throw std::logic_error("unknown Octagon storage kind");
+        assert(false && "unknown Octagon storage kind");
+        std::abort();
     }
 
     void set(std::size_t row, std::size_t column, const Bound& value)
@@ -161,7 +163,8 @@ public:
             setComponent(row, column, value);
             return;
         }
-        throw std::logic_error("unknown Octagon storage kind");
+        assert(false && "unknown Octagon storage kind");
+        std::abort();
     }
 
     bool tighten(std::size_t row, std::size_t column,
@@ -232,7 +235,8 @@ public:
             }
             return true;
         }
-        throw std::logic_error("unknown Octagon storage kind");
+        assert(false && "unknown Octagon storage kind");
+        std::abort();
     }
 
     /// Forget all relations incident to one dimension without scanning the
@@ -323,7 +327,8 @@ public:
             }
             return;
         }
-        throw std::logic_error("unknown Octagon storage kind");
+        assert(false && "unknown Octagon storage kind");
+        std::abort();
     }
 
     /// Materialize the point-wise maximum with rhs into a fresh sparse or
@@ -346,8 +351,8 @@ public:
         switch (kind_)
         {
         case OctagonStorageKind::DenseHalf:
-            throw std::logic_error(
-                "finite join copy is intended for sparse carriers");
+            assert(false && "finite join copy is intended for sparse carriers");
+            std::abort();
         case OctagonStorageKind::SparseFinite:
             for (const auto& [index, value] : sparse_)
             {
@@ -377,7 +382,8 @@ public:
             }
             return;
         }
-        throw std::logic_error("unknown Octagon storage kind");
+        assert(false && "unknown Octagon storage kind");
+        std::abort();
     }
 
     OctagonStorage converted(OctagonStorageKind kind,
@@ -485,7 +491,10 @@ public:
     std::vector<Dimension> relationComponent(Dimension seed) const
     {
         if (seed >= dimensions)
-            throw std::out_of_range("octagon relation seed is out of range");
+        {
+            assert(false && "octagon relation seed is out of range");
+            std::abort();
+        }
         if (bottom)
             return {seed};
         if (kind_ == OctagonStorageKind::ComponentDense)
@@ -549,7 +558,7 @@ private:
         std::shared_ptr<std::vector<Bound>> matrix;
     };
 
-    /// APRON's hmat layout stores triangular 2x2 variable blocks. Coherent
+    /// Store triangular 2x2 variable blocks. Coherent
     /// off-diagonal entries share an index. Each diagonal block is fully
     /// stored, so its two main-diagonal entries remain a distinct coherent
     /// pair that normalize() keeps equal. at(row,column) preserves the logical
@@ -901,9 +910,8 @@ OctagonStorageKind octagonStorageKindFromName(const std::string& name)
         return OctagonStorageKind::SparseFinite;
     if (name == "component-dense")
         return OctagonStorageKind::ComponentDense;
-    throw std::invalid_argument(
-        "unknown Octagon storage carrier '" + name +
-        "' (expected dense-half, sparse-finite, or component-dense)");
+    assert(false && "expected dense-half, sparse-finite, or component-dense Octagon storage");
+    std::abort();
 }
 
 class OctagonDomain::Impl final
@@ -939,8 +947,10 @@ public:
         OctagonStorage& state = asOctagon(genericState);
         requireVariables(layout, expression);
         if (!layout.contains(target))
-            throw std::invalid_argument(
-                "assignment target is not in relational layout");
+        {
+            assert(false && "assignment target is not in relational layout");
+            std::abort();
+        }
         if (layout.typeOf(target).kind == NumericKind::IEEEFloat)
         {
             forget(state, layout.dimensionOf(target));
@@ -1146,8 +1156,10 @@ public:
                 Variable variable) const
     {
         if (!layout.contains(variable))
-            throw std::invalid_argument(
-                "forgotten variable is not in relational layout");
+        {
+            assert(false && "forgotten variable is not in relational layout");
+            std::abort();
+        }
         forget(asOctagon(genericState), layout.dimensionOf(variable));
     }
 
@@ -1202,8 +1214,7 @@ public:
         // K[i,j] <= K[i,h] + K[h,j] <= R[i,h] + R[h,j]; the same monotonicity
         // argument applies to the strong-closure inequality. Integer-tight
         // unary entries remain even because the maximum of two even bounds is
-        // even. APRON's oct_join uses this same closed-result fast path instead
-        // of scheduling another cubic close.
+        // even, so the result needs no further closure.
         result->stronglyClosed = true;
         return result;
     }
@@ -1362,8 +1373,10 @@ public:
         const OctagonStorage& source =
             normalized(asOctagon(genericState), sourceStorage);
         if (source.dimensions != oldLayout.size())
-            throw std::invalid_argument(
-                "old layout does not match octagon dimensions");
+        {
+            assert(false && "old layout does not match octagon dimensions");
+            std::abort();
+        }
         if (source.bottom)
             return std::make_unique<OctagonStorage>(newLayout,
                                                     source.kind(), true);
@@ -1380,8 +1393,10 @@ public:
                 continue;
             if (oldLayout.typeOf(variable) !=
                     newLayout.typeOf(variable))
-                throw std::invalid_argument(
-                    "layout change cannot alter a variable's type");
+            {
+                assert(false && "layout change cannot alter a variable's type");
+                std::abort();
+            }
             newDimensions[oldDimension] =
                 newLayout.dimensionOf(variable);
         }
@@ -1441,8 +1456,10 @@ public:
                    const DimensionLayout& layout, Variable variable) const
     {
         if (!layout.contains(variable))
-            throw std::invalid_argument(
-                "bounded variable is not in relational layout");
+        {
+            assert(false && "bounded variable is not in relational layout");
+            std::abort();
+        }
         std::optional<OctagonStorage> storage;
         const OctagonStorage& state =
             normalized(asOctagon(genericState), storage);
@@ -1610,8 +1627,10 @@ public:
                                Variable target, const Interval& value)
     {
         if (!layout.contains(target))
-            throw std::invalid_argument(
-                "assignment target is not in relational layout");
+        {
+            assert(false && "assignment target is not in relational layout");
+            std::abort();
+        }
         if (state_.bottom)
             return;
         const Dimension dimension = layout.dimensionOf(target);
@@ -1767,7 +1786,10 @@ private:
     {
         if (lhs.dimensions != rhs.dimensions ||
                 lhs.variableKinds != rhs.variableKinds)
-            throw std::invalid_argument("octagon state shapes do not match");
+        {
+            assert(false && "octagon state shapes do not match");
+            std::abort();
+        }
     }
 
     void requireVariables(const DimensionLayout& layout,
@@ -1777,8 +1799,10 @@ private:
         {
             (void)coefficient;
             if (!layout.contains(variable))
-                throw std::invalid_argument(
-                    "expression variable is not in relational layout");
+            {
+                assert(false && "expression variable is not in relational layout");
+                std::abort();
+            }
         }
     }
 
@@ -1795,7 +1819,10 @@ private:
     void forget(OctagonStorage& state, Dimension dimension) const
     {
         if (dimension >= state.dimensions)
-            throw std::out_of_range("invalid forgotten octagon dimension");
+        {
+            assert(false && "invalid forgotten octagon dimension");
+            std::abort();
+        }
         if (state.bottom)
             return;
         normalize(state);
@@ -2378,8 +2405,7 @@ private:
     }
 
     /// Restore closure after adding exact constraints that all involve one
-    /// variable to an already strongly closed DBM. This is the logical-matrix
-    /// form of APRON octagons' hmat_close_incremental: first repair rows and
+    /// variable to an already strongly closed DBM. First repair rows and
     /// columns incident to the changed variable, then use its two signed nodes
     /// as the only new pivots. The unaffected submatrix was already closed, so
     /// the work is quadratic rather than cubic.
@@ -2721,7 +2747,10 @@ void OctagonDomain::substituteParallel(
     for (const auto& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument("duplicate parallel target");
+        {
+            assert(false && "duplicate parallel target");
+            std::abort();
+        }
         variables.push_back(assignment.target);
         for (const auto& term : assignment.expression.terms())
             variables.push_back(term.first);
@@ -2732,19 +2761,25 @@ void OctagonDomain::substituteParallel(
     for (const LinearAssignment& assignment : assignments)
     {
         if (!layout_.contains(assignment.target))
-            throw std::invalid_argument(
-                "substitution target is not in layout");
+        {
+            assert(false && "substitution target is not in layout");
+            std::abort();
+        }
         if (!replacements.emplace(assignment.target, assignment.expression)
                 .second)
-            throw std::invalid_argument(
-                "parallel substitution contains a duplicate target");
+        {
+            assert(false && "parallel substitution contains a duplicate target");
+            std::abort();
+        }
         for (const auto& [variable, coefficient] :
                 assignment.expression.terms())
         {
             (void)coefficient;
             if (!layout_.contains(variable))
-                throw std::invalid_argument(
-                    "substitution expression uses an unknown variable");
+            {
+                assert(false && "substitution expression uses an unknown variable");
+                std::abort();
+            }
         }
     }
     recordOperation(OperationKind::Substitution, ApproximationKind::Exact,
@@ -2874,17 +2909,24 @@ void OctagonDomain::expandDimensions(
     Variable source, const std::vector<DimensionEntry>& copies)
 {
     if (!layout_.contains(source))
-        throw std::invalid_argument("expanded variable is not in layout");
+    {
+        assert(false && "expanded variable is not in layout");
+        std::abort();
+    }
     std::set<Variable> seen;
     for (const DimensionEntry& copy : copies)
     {
         if (layout_.contains(copy.variable) ||
                 !seen.insert(copy.variable).second)
-            throw std::invalid_argument(
-                "expanded variables must be new and unique");
+        {
+            assert(false && "expanded variables must be new and unique");
+            std::abort();
+        }
         if (copy.variable.type() != layout_.typeOf(source))
-            throw std::invalid_argument(
-                "expanded variables must have the source numeric type");
+        {
+            assert(false && "expanded variables must have the source numeric type");
+            std::abort();
+        }
     }
     if (copies.empty())
     {
@@ -2931,18 +2973,25 @@ void OctagonDomain::fold(Variable target,
     ensureVariables(variables);
 
     if (!layout_.contains(target))
-        throw std::invalid_argument("fold target is not in layout");
+    {
+        assert(false && "fold target is not in layout");
+        std::abort();
+    }
     std::set<Variable> seen;
     std::vector<Variable> sources{target};
     for (Variable variable : folded)
     {
         if (variable == target || !layout_.contains(variable) ||
                 !seen.insert(variable).second)
-            throw std::invalid_argument(
-                "folded variables must be distinct non-target dimensions");
+        {
+            assert(false && "folded variables must be distinct non-target dimensions");
+            std::abort();
+        }
         if (layout_.typeOf(variable) != layout_.typeOf(target))
-            throw std::invalid_argument(
-                "folded variables must have the target numeric type");
+        {
+            assert(false && "folded variables must have the target numeric type");
+            std::abort();
+        }
         sources.push_back(variable);
     }
     if (folded.empty())
@@ -3014,7 +3063,8 @@ CheckResult OctagonDomain::entails(const LinearConstraint& constraint) const
         break;
     case ConstraintKind::Equal:
     case ConstraintKind::NotEqual:
-        throw std::logic_error("equality entailment was not normalized");
+        assert(false && "equality entailment was not normalized");
+        std::abort();
     }
     OctagonDomain counterexample(*this);
     counterexample.assume(
@@ -3170,8 +3220,10 @@ OctagonDomain OctagonDomain::narrow(const OctagonDomain& next) const
     }
 
     if (!next.leqDomain(*this))
-        throw std::invalid_argument(
-            "narrowing requires next to be included in current");
+    {
+        assert(false && "narrowing requires next to be included in current");
+        std::abort();
+    }
     OctagonDomain result(layout(), impl_->narrowed(*next.impl_));
     result.recordOperation(OperationKind::Narrowing,
                            ApproximationKind::Exact, true);
@@ -3195,7 +3247,10 @@ const OctagonDomain& OctagonDomain::requireOctagon(
                           ? &static_cast<const OctagonDomain&>(other)
                           : nullptr;
     if (!octagon)
-        throw std::invalid_argument("relational state is not an OctagonDomain");
+    {
+        assert(false && "relational state is not an OctagonDomain");
+        std::abort();
+    }
     return *octagon;
 }
 
@@ -3424,7 +3479,10 @@ void OctagonDomain::expand(Variable source, const std::vector<Variable>& copies)
     std::set<Variable> seen;
     for (Variable variable : copies)
         if (variable == source || variable.type() != source.type() || !seen.insert(variable).second)
-            throw std::invalid_argument("expand requires distinct, same-type copies");
+        {
+            assert(false && "expand requires distinct, same-type copies");
+            std::abort();
+        }
     // Copies are overwritten, just as in Box. A coordinate retained after a
     // previous forget must not change the meaning of a fresh expansion.
     changeLayout(layout_.remove(copies));
@@ -3442,7 +3500,10 @@ void OctagonDomain::assignParallel(const LinearAssignmentList& assignments)
     for (const auto& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument("duplicate parallel target");
+        {
+            assert(false && "duplicate parallel target");
+            std::abort();
+        }
         variables.push_back(assignment.target);
         for (const auto& term : assignment.expression.terms())
             variables.push_back(term.first);
@@ -3463,7 +3524,10 @@ void OctagonDomain::assignParallel(const LinearAssignmentList& assignments)
                 occupied.count(Variable(static_cast<std::uint32_t>(id), assignment.target.type())))
             ++id;
         if (id > std::numeric_limits<std::uint32_t>::max())
-            throw std::length_error("no temporary variable available");
+        {
+            assert(false && "no temporary variable available");
+            std::abort();
+        }
         const Variable temporary(static_cast<std::uint32_t>(id), assignment.target.type());
         temporaries.push_back(temporary);
         occupied.insert(temporary);

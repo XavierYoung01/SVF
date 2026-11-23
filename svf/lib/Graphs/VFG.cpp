@@ -460,7 +460,16 @@ void VFG::addVFGNodes()
     for (SVFStmt::SVFStmtSetTy::iterator iter = addrs.begin(), eiter =
                 addrs.end(); iter != eiter; ++iter)
     {
-        addAddrVFGNode(SVFUtil::cast<AddrStmt>(*iter));
+        const auto* addr = SVFUtil::cast<AddrStmt>(*iter);
+        const auto* argument = SVFUtil::dyn_cast<ArgValVar>(addr->getLHSVar());
+        if (argument &&
+                (SVFUtil::isa<GlobalICFGNode>(addr->getICFGNode()) ||
+                 addr->getICFGNode() == argument->getICFGNode()))
+        {
+            // Entry input constraints belong to the formal parameter definition.
+            continue;
+        }
+        addAddrVFGNode(addr);
     }
 
     // initialize copy nodes

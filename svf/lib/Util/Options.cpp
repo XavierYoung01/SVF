@@ -220,12 +220,11 @@ const Option<std::string> Options::SelfCycle(
 
 
 // Sparse value-flow graph (VFG.cpp)
-const Option<bool> Options::DumpVFG(
-    "dump-vfg",
-    "Dump dot graph of VFG",
-    false
-);
-
+const Option<bool> Options::DumpVFG("dump-vfg", "Dump dot graph of VFG", false);
+const Option<bool> Options::DumpSparseObjGraph(
+    "dump-sparse-obj-graph",
+    "Dump object routes to sparse_obj_graph.dot when a full SVFG is built",
+    false);
 
 // Base class of pointer analyses (PointerAnalysis.cpp)
 const Option<bool> Options::TypePrint(
@@ -555,12 +554,6 @@ Option<bool> Options::SVFMain(
     false
 );
 
-Option<bool> Options::PiNodes(
-    "pi-nodes",
-    "Insert e-SSA pi nodes for integer branch and switch operands before building SVFIR",
-    false
-);
-
 Option<bool> Options::ModelConsts(
     "model-consts",
     "Modeling individual constant objects",
@@ -840,11 +833,35 @@ const OptionMap<u32_t> Options::AEDomain(
         "General convex linear constraints."
     }
 });
+const Option<bool> Options::AEClosureDifferences(
+    "ae-closure-differences", "Restrict Closure arithmetic edges to copies with offsets and differences.", false);
+const Option<bool> Options::AEClosureQueries(
+    "ae-closure-queries", "Keep Closure components containing any query variable.", false);
+const Option<bool> Options::AEClosureDependencySlice(
+    "ae-closure-dependency-slice", "Close query demands over control dependencies; retain full Closure for unverified effects.", false);
+const Option<bool> Options::AEClosureBoxMay(
+    "ae-closure-box-may", "Run certified Box before selecting Closure packs for its May queries.", false);
+const Option<bool> Options::AEOnDemand(
+    "ae-ondemand", "Run certified sparse Box and retain entire packs for residual May queries.", false);
+const Option<bool> Options::AEVerifyQueryCoverage(
+    "ae-verify-query-coverage", "Require complete query observations and independent final reevaluation.", false);
+const Option<bool> Options::AEImpactQueryComponents(
+    "ae-impact-query-components", "Keep query-variable components instead of legacy Impact snapshots.", true);
 const OptionMap<u32_t> Options::AERelationalPolicy(
     "ae-relational-policy",
     "Relational-domain activation policy (Default: whole)",
     AbstractInterpretation::AERelationalPolicy::WholeRelational,
 {
+    {
+        AbstractInterpretation::AERelationalPolicy::SpePackedRelational,
+        "spe17-pack",
+        "Build SPE-derived witness packs for dense, context-insensitive Octagon."
+    },
+    {
+        AbstractInterpretation::AERelationalPolicy::DuetPackedRelational,
+        "duet12",
+        "Build the DUET Algorithm 2 partition for sparse Octagon."
+    },
     {
         AbstractInterpretation::AERelationalPolicy::LearnedPackedRelational,
         "learned-pack",
@@ -902,6 +919,8 @@ const OptionMap<u32_t> Options::AERelationalCallPolicy(
     }
 });
 const Option<u32_t> Options::AEPackMaxVars("ae-pack-max-vars", "Maximum syntax pack size", 10);
+const Option<bool> Options::AESVComp(
+    "ae-sv-comp", "Use SV-COMP reachability and nondeterministic input semantics.", false);
 const Option<bool> Options::AEHarnessNondetNoCallback(
     "ae-harness-nondet-no-callback",
     "Explicit test-harness premise: nondet_i32 cannot call user code (default: false).",

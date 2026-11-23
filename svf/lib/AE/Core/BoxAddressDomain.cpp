@@ -23,10 +23,12 @@
 
 #include "AE/Core/BoxAddressDomain.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <algorithm>
 #include <iterator>
 #include <sstream>
-#include <stdexcept>
+#include "Util/SparseBitVector.h"
 
 namespace SVF
 {
@@ -53,7 +55,10 @@ BoxAddressDomain::BoxAddressDomain(
       trackInitialization_(trackInitialization)
 {
     if (!numerical_)
-        throw std::invalid_argument("product requires a numerical domain");
+    {
+        assert(false && "product requires a numerical domain");
+        std::abort();
+    }
 }
 
 BoxAddressDomain::BoxAddressDomain(
@@ -64,7 +69,10 @@ BoxAddressDomain::BoxAddressDomain(
       addresses_(std::move(addresses)), lifetimes_(std::move(lifetimes))
 {
     if (!numerical_)
-        throw std::invalid_argument("product requires a numerical domain");
+    {
+        assert(false && "product requires a numerical domain");
+        std::abort();
+    }
 }
 
 BoxAddressDomain::BoxAddressDomain(const BoxAddressDomain& other)
@@ -163,6 +171,55 @@ bool BoxAddressDomain::hasValue(Variable variable) const
            !addresses_.addressSet(variable).isTop();
 }
 
+const Interval& BoxAddressDomain::boxInterval(Variable variable) const
+{
+    static const Interval bottom = Interval::bottom();
+    if (isBottomDomain() || (trackInitialization_ &&
+            !mayBeInitialized(numericalInitialization_.value(variable))))
+        return bottom;
+    return static_cast<const BoxDomain&>(*numerical_).boundAt(variable);
+}
+
+bool BoxAddressDomain::hasSameValue(Variable variable,
+                                    const BoxAddressDomain& other) const
+{
+    if (numerical_->kind() != DomainKind::Box ||
+            other.numerical_->kind() != DomainKind::Box)
+        return interval(variable) == other.interval(variable) &&
+               addressSet(variable) == other.addressSet(variable);
+    const Interval& left = boxInterval(variable);
+    const Interval& right = other.boxInterval(variable);
+    return (&left == &right || left == right) &&
+           addressSet(variable) == other.addressSet(variable);
+}
+
+bool BoxAddressDomain::hasSameValues(const BoxAddressDomain& other) const
+{
+    if (isBottomDomain() != other.isBottomDomain())
+        return false;
+    const auto check = [&](const BoxAddressDomain& source, bool compare) {
+        if (!source.trackInitialization_)
+            return true;
+        for (const auto* facet : {&source.numericalInitialization_,
+                                  &source.addressInitialization_})
+            for (const auto& entry : *facet->pages_)
+            {
+                auto bits = entry.page->uninitialized | entry.page->initialized;
+                while (bits)
+                {
+                    const Variable variable(entry.key.id() * InitializationDomain::ValuesPerPage +
+                                            countTrailingZeros(bits), entry.key.type());
+                    if (compare ? !hasSameValue(variable, other)
+                                : (!hasValue(variable) && other.hasValue(variable)))
+                        return false;
+                    bits &= bits - 1;
+                }
+            }
+        return true;
+    };
+    return check(*this, true) && check(other, false);
+}
+
 void BoxAddressDomain::setInterval(Variable variable, const Interval& value)
 {
     if (isBottomDomain())
@@ -198,9 +255,11 @@ void BoxAddressDomain::assignValueFrom(Variable target,
                                        Variable source)
 {
     if (trackInitialization_ != sourceState.trackInitialization_)
-        throw std::invalid_argument("incompatible initialization tracking");
+    {
+        assert(false && "incompatible initialization tracking");
+        std::abort();
+    }
 
-    const Interval number = sourceState.interval(source);
     const AddressSet pointers = sourceState.addressSet(source);
     InitializationState numericGuard = InitializationState::Bottom;
     InitializationState pointerGuard = InitializationState::Bottom;
@@ -209,7 +268,10 @@ void BoxAddressDomain::assignValueFrom(Variable target,
         numericGuard = sourceState.numericalInitialization_.value(source);
         pointerGuard = sourceState.addressInitialization_.value(source);
     }
-    setInterval(target, number);
+    if (sourceState.numerical_->kind() == DomainKind::Box)
+        setInterval(target, sourceState.boxInterval(source));
+    else
+        setInterval(target, sourceState.interval(source));
     setAddressSet(target, pointers);
     if (trackInitialization_)
     {
@@ -223,7 +285,10 @@ void BoxAddressDomain::joinValueFrom(Variable target,
                                      Variable source)
 {
     if (trackInitialization_ != sourceState.trackInitialization_)
-        throw std::invalid_argument("incompatible initialization tracking");
+    {
+        assert(false && "incompatible initialization tracking");
+        std::abort();
+    }
 
     Interval number = interval(target);
     AddressSet pointers = addressSet(target);
@@ -238,7 +303,10 @@ void BoxAddressDomain::joinValueFrom(Variable target,
                            addressInitialization_.value(target),
                            sourceState.addressInitialization_.value(source));
     }
-    number.joinWith(sourceState.interval(source));
+    if (sourceState.numerical_->kind() == DomainKind::Box)
+        number.joinWith(sourceState.boxInterval(source));
+    else
+        number.joinWith(sourceState.interval(source));
     pointers.joinWith(sourceState.addressSet(source));
     setInterval(target, number);
     setAddressSet(target, pointers);
@@ -264,7 +332,10 @@ BoxAddressDomain BoxAddressDomain::withoutValues(
     const std::set<Variable>& omitted) const
 {
     if (numerical_->kind() != DomainKind::Box)
-        throw std::invalid_argument("coordinate selection requires Box");
+    {
+        assert(false && "coordinate selection requires Box");
+        std::abort();
+    }
     if (isBottomDomain() || omitted.empty())
         return *this;
 
@@ -450,6 +521,12 @@ void BoxAddressDomain::combineInitialized(
         {
             if (result.isBottomDomain())
                 break;
+            const auto& leftBox = static_cast<const BoxDomain&>(*numerical_);
+            const auto& rightBox = static_cast<const BoxDomain&>(*other.numerical_);
+            if (mayBeInitialized(numericalInitialization_.value(variable)) &&
+                    mayBeInitialized(other.numericalInitialization_.value(variable)) &&
+                    leftBox.boundAt(variable) == rightBox.boundAt(variable))
+                continue;
             Interval number = interval(variable);
             const Interval nextNumber = other.interval(variable);
             if (intersect)
@@ -756,7 +833,10 @@ Variable MemoryLayout::contentOf(Location location) const
 {
     const auto it = cells_->find(location);
     if (it == cells_->end())
-        throw std::out_of_range("location has no content symbol");
+    {
+        assert(false && "location has no content symbol");
+        std::abort();
+    }
     return it->second;
 }
 
@@ -764,8 +844,10 @@ void MemoryLayout::extend(Location location, Variable content)
 {
     const auto [iterator, inserted] = cells_->emplace(location, content);
     if (!inserted && iterator->second != content)
-        throw std::invalid_argument(
-            "location already has a different content symbol");
+    {
+        assert(false && "location already has a different content symbol");
+        std::abort();
+    }
 }
 
 void BoxAddressDomain::restoreMissingNumericalInitializationFrom(
@@ -774,7 +856,10 @@ void BoxAddressDomain::restoreMissingNumericalInitializationFrom(
     if (isBottom() || caller.isBottom() || !trackInitialization_)
         return;
     if (trackInitialization_ != caller.trackInitialization_)
-        throw std::invalid_argument("incompatible initialization tracking");
+    {
+        assert(false && "incompatible initialization tracking");
+        std::abort();
+    }
     if (!mayBeInitialized(numericalInitialization_.value(variable)))
         numericalInitialization_.assign(
             variable, caller.numericalInitialization_.value(variable));
@@ -824,6 +909,334 @@ void BoxAddressDomain::restoreMissingAddressFrom(
         if (!addresses.isTop())
             addresses_.assign(content, addresses);
     }
+}
+
+std::shared_ptr<InitializationDomain::Directory> InitializationDomain::emptyPages()
+{
+    static const auto empty = std::make_shared<Directory>();
+    return empty;
+}
+
+InitializationDomain::InitializationDomain(InitializationState state)
+    : default_(state), pages_(emptyPages())
+{
+    if (static_cast<unsigned>(state) > 3)
+    {
+        assert(false && "invalid initialization state");
+        std::abort();
+    }
+}
+
+InitializationDomain InitializationDomain::top()
+{
+    return uniform(InitializationState::Top);
+}
+
+InitializationDomain InitializationDomain::bottom()
+{
+    return uniform(InitializationState::Bottom);
+}
+
+InitializationDomain InitializationDomain::uniform(InitializationState state)
+{
+    return InitializationDomain(state);
+}
+
+std::unique_ptr<AbstractDomain> InitializationDomain::clone() const
+{
+    return std::make_unique<InitializationDomain>(*this);
+}
+
+InitializationState InitializationDomain::defaultState() const
+{
+    return default_;
+}
+
+InitializationState InitializationDomain::value(Variable variable) const
+{
+    const Variable key(variable.id() / ValuesPerPage, variable.type());
+    const auto it = std::lower_bound(pages_->begin(), pages_->end(), key,
+                                     [](const PageEntry& entry, Variable target)
+    {
+        return entry.key < target;
+    });
+    if (it == pages_->end() || it->key != key)
+        return default_;
+    const auto bit = std::uint64_t{1} << (variable.id() % ValuesPerPage);
+    const unsigned state = ((it->page->uninitialized & bit) ? 1U : 0U) |
+                           ((it->page->initialized & bit) ? 2U : 0U);
+    return state ? static_cast<InitializationState>(state) : default_;
+}
+
+void InitializationDomain::assign(Variable variable, InitializationState state)
+{
+    if (static_cast<unsigned>(state) > 3)
+    {
+        assert(false && "invalid initialization state");
+        std::abort();
+    }
+    if (isBottomDomain() || value(variable) == state)
+        return;
+    if (state == InitializationState::Bottom)
+    {
+        *this = bottom();
+        return;
+    }
+    if (pages_.use_count() != 1)
+        pages_ = std::make_shared<Directory>(*pages_);
+    const Variable key(variable.id() / ValuesPerPage, variable.type());
+    auto it = std::lower_bound(pages_->begin(), pages_->end(), key,
+                               [](const PageEntry& entry, Variable target)
+    {
+        return entry.key < target;
+    });
+    if (it == pages_->end() || it->key != key)
+        it = pages_->insert(it, {key, std::make_shared<Page>()});
+    else if (it->page.use_count() != 1)
+        it->page = std::make_shared<Page>(*it->page);
+    const auto bit = std::uint64_t{1} << (variable.id() % ValuesPerPage);
+    const unsigned stored = state == default_ ? 0 : static_cast<unsigned>(state);
+    auto& page = *it->page;
+    page.uninitialized = (page.uninitialized & ~bit) | ((stored & 1U) ? bit : 0);
+    page.initialized = (page.initialized & ~bit) | ((stored & 2U) ? bit : 0);
+    if (!(page.uninitialized | page.initialized))
+        pages_->erase(it);
+}
+
+void InitializationDomain::forget(Variable variable)
+{
+    assign(variable, InitializationState::Top);
+}
+
+std::vector<Variable> InitializationDomain::nonDefaultVariables() const
+{
+    return nonDefaultVariables(nullptr);
+}
+
+std::vector<Variable> InitializationDomain::nonDefaultVariablesBefore(
+    Variable upperBound) const
+{
+    return nonDefaultVariables(&upperBound);
+}
+
+std::vector<Variable> InitializationDomain::nonDefaultVariables(
+    const Variable* upperBound) const
+{
+    std::vector<Variable> variables;
+    for (auto it = pages_->begin(); it != pages_->end();)
+    {
+        const auto first = variables.size();
+        const auto index = it->key.id();
+        if (upperBound && index > upperBound->id() / ValuesPerPage)
+            break;
+        unsigned types = 0;
+        do
+        {
+            auto bits = it->page->uninitialized | it->page->initialized;
+            while (bits)
+            {
+                const auto slot = countTrailingZeros(bits);
+                const Variable variable(index * ValuesPerPage + slot, it->key.type());
+                if (upperBound && !(variable < *upperBound))
+                    break;
+                variables.push_back(variable);
+                bits &= bits - 1;
+            }
+            ++types;
+            ++it;
+        }
+        while (it != pages_->end() && it->key.id() == index);
+        // Different types can share the same numeric ID. Preserve the public
+        // Variable ordering (ID first), not the internal page/type ordering.
+        if (types > 1)
+            std::sort(variables.begin() + first, variables.end());
+    }
+    return variables;
+}
+
+bool InitializationDomain::hasCompatibleDomain(const AbstractDomain& other) const
+{
+    return other.isDomain<InitializationDomain>();
+}
+
+InitializationDomain::Page InitializationDomain::expanded(
+    const Page* page, InitializationState defaultState)
+{
+    Page result = page ? *page : Page{};
+    const auto missing = ~(result.uninitialized | result.initialized);
+    if (static_cast<unsigned>(defaultState) & 1U)
+        result.uninitialized |= missing;
+    if (static_cast<unsigned>(defaultState) & 2U)
+        result.initialized |= missing;
+    return result;
+}
+
+InitializationDomain::Page InitializationDomain::exceptions(
+    Page values, InitializationState defaultState)
+{
+    const auto same = ((static_cast<unsigned>(defaultState) & 1U)
+                       ? values.uninitialized : ~values.uninitialized) &
+                      ((static_cast<unsigned>(defaultState) & 2U)
+                       ? values.initialized : ~values.initialized);
+    values.uninitialized &= ~same;
+    values.initialized &= ~same;
+    return values;
+}
+
+void InitializationDomain::combine(const InitializationDomain& other, bool join)
+{
+    if (pages_ == other.pages_ && default_ == other.default_)
+        return;
+    if (other.isBottomDomain())
+    {
+        if (!join)
+            *this = bottom();
+        return;
+    }
+    if (isBottomDomain())
+    {
+        if (join)
+            *this = other;
+        return;
+    }
+    const auto op = [join](InitializationState lhs, InitializationState rhs)
+    {
+        const auto a = static_cast<unsigned>(lhs);
+        const auto b = static_cast<unsigned>(rhs);
+        return static_cast<InitializationState>(join ? a | b : a & b);
+    };
+    InitializationDomain result(op(default_, other.default_));
+    if (!result.isBottomDomain())
+    {
+        result.pages_ = std::make_shared<Directory>();
+        result.pages_->reserve(std::max(pages_->size(), other.pages_->size()));
+        auto left = pages_->begin();
+        auto right = other.pages_->begin();
+        while (left != pages_->end() || right != other.pages_->end())
+        {
+            const auto key = right == other.pages_->end() ? left->key :
+                             left == pages_->end() ? right->key :
+                             std::min(left->key, right->key);
+            const PageEntry* a = left != pages_->end() && left->key == key
+                                 ? &*left++ : nullptr;
+            const PageEntry* b = right != other.pages_->end() && right->key == key
+                                 ? &*right++ : nullptr;
+            if (a && b && a->page == b->page && default_ == other.default_)
+            {
+                result.pages_->push_back(*a);
+                continue;
+            }
+            const Page av = expanded(a ? a->page.get() : nullptr, default_);
+            const Page bv = expanded(b ? b->page.get() : nullptr, other.default_);
+            Page values;
+            values.uninitialized = join ? av.uninitialized | bv.uninitialized
+                                   : av.uninitialized & bv.uninitialized;
+            values.initialized = join ? av.initialized | bv.initialized
+                                 : av.initialized & bv.initialized;
+            if (~(values.uninitialized | values.initialized))
+            {
+                *this = bottom();
+                return;
+            }
+            values = exceptions(values, result.default_);
+            if (!(values.uninitialized | values.initialized))
+                continue;
+            const auto matches = [&values](const PageEntry* entry)
+            {
+                return entry && entry->page->uninitialized == values.uninitialized &&
+                       entry->page->initialized == values.initialized;
+            };
+            if (matches(a))
+                result.pages_->push_back(*a);
+            else if (matches(b))
+                result.pages_->push_back(*b);
+            else
+                result.pages_->push_back({key, std::make_shared<Page>(values)});
+        }
+    }
+    *this = std::move(result);
+}
+
+void InitializationDomain::joinDomain(const AbstractDomain& other)
+{
+    combine(static_cast<const InitializationDomain&>(other), true);
+}
+
+void InitializationDomain::meetDomain(const AbstractDomain& other)
+{
+    combine(static_cast<const InitializationDomain&>(other), false);
+}
+
+void InitializationDomain::widenDomain(const AbstractDomain& next)
+{
+    joinDomain(next);
+}
+
+void InitializationDomain::narrowDomain(const AbstractDomain& next)
+{
+    meetDomain(next);
+}
+
+bool InitializationDomain::isBottomDomain() const
+{
+    return default_ == InitializationState::Bottom;
+}
+
+bool InitializationDomain::isTopDomain() const
+{
+    return default_ == InitializationState::Top && pages_->empty();
+}
+
+bool InitializationDomain::leqDomain(const AbstractDomain& other) const
+{
+    const auto& rhs = static_cast<const InitializationDomain&>(other);
+    if (isBottomDomain())
+        return true;
+    const auto included = [](InitializationState a, InitializationState b)
+    {
+        return (static_cast<unsigned>(a) & static_cast<unsigned>(b)) ==
+               static_cast<unsigned>(a);
+    };
+    if (!included(default_, rhs.default_))
+        return false;
+    if (default_ == rhs.default_ && pages_ == rhs.pages_)
+        return true;
+    auto left = pages_->begin();
+    auto right = rhs.pages_->begin();
+    while (left != pages_->end() || right != rhs.pages_->end())
+    {
+        const auto key = right == rhs.pages_->end() ? left->key :
+                         left == pages_->end() ? right->key :
+                         std::min(left->key, right->key);
+        const Page* a = left != pages_->end() && left->key == key
+                        ? (left++)->page.get() : nullptr;
+        const Page* b = right != rhs.pages_->end() && right->key == key
+                        ? (right++)->page.get() : nullptr;
+        if (a == b && default_ == rhs.default_)
+            continue;
+        const Page av = expanded(a, default_);
+        const Page bv = expanded(b, rhs.default_);
+        if ((av.uninitialized & ~bv.uninitialized) ||
+                (av.initialized & ~bv.initialized))
+            return false;
+    }
+    return true;
+}
+
+std::string InitializationDomain::domainToString() const
+{
+    static const char* names[] = {"bottom", "uninitialized", "initialized", "top"};
+    std::ostringstream out;
+    out << "default=" << names[static_cast<unsigned>(default_)] << '{';
+    bool first = true;
+    for (Variable variable : nonDefaultVariables())
+    {
+        if (!first)
+            out << ',';
+        first = false;
+        out << variable.id() << '=' << names[static_cast<unsigned>(value(variable))];
+    }
+    return out.str() + '}';
 }
 
 } // namespace SVF

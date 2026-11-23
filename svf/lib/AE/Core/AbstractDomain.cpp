@@ -23,7 +23,8 @@
 
 #include "AE/Core/AbstractDomain.h"
 
-#include <stdexcept>
+#include <cstdlib>
+#include <cassert>
 
 namespace SVF
 {
@@ -47,8 +48,10 @@ AbstractDomain::~AbstractDomain() = default;
 void AbstractDomain::requireCompatible(const AbstractDomain& other) const
 {
     if (!hasCompatibleDomain(other))
-        throw std::invalid_argument(
-            "abstract properties use incompatible domains or configurations");
+    {
+        assert(false && "abstract properties use incompatible domains or configurations");
+        std::abort();
+    }
 }
 
 void AbstractDomain::joinWith(const AbstractDomain& other)
@@ -73,8 +76,10 @@ void AbstractDomain::narrowWith(const AbstractDomain& next)
 {
     requireCompatible(next);
     if (!next.leqDomain(*this))
-        throw std::invalid_argument(
-            "narrowing requires next to be included in current");
+    {
+        assert(false && "narrowing requires next to be included in current");
+        std::abort();
+    }
     narrowDomain(next);
 }
 

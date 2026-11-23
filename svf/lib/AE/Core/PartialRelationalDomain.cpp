@@ -19,8 +19,7 @@
 
 #include "AE/Core/PartialRelationalDomain.h"
 
-#include "AE/Core/Expression.h"
-#include "AE/Core/NumericalDomainFactory.h"
+#include "AE/Core/NumericalDomain.h"
 
 #include <algorithm>
 #include <iterator>

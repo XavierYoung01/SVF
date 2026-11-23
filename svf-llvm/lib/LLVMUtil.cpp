@@ -757,12 +757,13 @@ const std::string SVFValue::valueOnlyToString() const
         !SVFUtil::isa<DummyObjVar>(this) &&!SVFUtil::isa<DummyValVar>(this) &&
         !SVFUtil::isa<BlackHoleValVar>(this) &&
         "invalid value, refer to their toString method");
-    auto llvmVal =
-        LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(this);
+    auto llvmVal = hasLLVMValue()
+                   ? LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(this)
+                   : nullptr;
     if (llvmVal)
         rawstr << " " << *llvmVal << " ";
     else
-        rawstr << "";
+        rawstr << " " << getName() << " ";
     rawstr << getSourceLoc();
     return rawstr.str();
 }

@@ -23,6 +23,8 @@
 
 #include "AE/Core/ConvexPolyhedraDomain.h"
 
+#include <cstdlib>
+#include <cassert>
 #include <algorithm>
 #include <bitset>
 #include <cstddef>
@@ -33,7 +35,6 @@
 #include <optional>
 #include <set>
 #include <sstream>
-#include <stdexcept>
 #include <utility>
 
 namespace SVF
@@ -173,7 +174,10 @@ bool trueConstant(const Inequality& inequality)
 Inequality scaled(const Inequality& inequality, const Rational& factor)
 {
     if (factor.sign() <= 0)
-        throw std::invalid_argument("inequality scale must be positive");
+    {
+        assert(false && "inequality scale must be positive");
+        std::abort();
+    }
     Inequality result = inequality;
     for (Rational& coefficient : result.coefficients)
         coefficient *= factor;
@@ -450,8 +454,10 @@ std::vector<Inequality> constraintRows(const DimensionLayout& layout,
         for (const auto& [variable, coefficient] : expression.terms())
         {
             if (!layout.contains(variable))
-                throw std::invalid_argument(
-                    "polyhedron constraint uses an unknown variable");
+            {
+                assert(false && "polyhedron constraint uses an unknown variable");
+                std::abort();
+            }
             row.coefficients[layout.dimensionOf(variable)] = coefficient;
         }
         row.bound = -expression.constant();
@@ -625,11 +631,13 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGeneratorsInLayout(
         return generator.kind == PolyhedraGeneratorKind::Point;
     });
     if (!hasIncludedPoint)
-        throw std::invalid_argument(
-            "a nonempty generator system requires an included point");
+    {
+        assert(false && "a nonempty generator system requires an included point");
+        std::abort();
+    }
 
-    // Public PPL/APRON-style NNC generators carry point/closure membership,
-    // not the internal numeric epsilon witness. First compute the facets of
+    // Generators distinguish included points from excluded boundary points.
+    // They do not expose the internal epsilon witness. First compute the facets of
     // their closed hull, then mark exactly those facets strict that no
     // included point saturates. This is invariant under the internal epsilon
     // scaling chosen by a previous H -> V conversion.
@@ -638,8 +646,10 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGeneratorsInLayout(
     for (const PolyhedraGenerator& generator : generators)
     {
         if (generator.coordinates.size() != layout.size())
-            throw std::invalid_argument(
-                "generator coordinates do not match the layout");
+        {
+            assert(false && "generator coordinates do not match the layout");
+            std::abort();
+        }
         std::vector<mpq_class> coordinates(layout.size() + 1);
         const bool finite =
             generator.kind == PolyhedraGeneratorKind::Point ||
@@ -740,7 +750,10 @@ void ConvexPolyhedraDomain::assignParallel(
     for (const auto& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument("duplicate parallel target");
+        {
+            assert(false && "duplicate parallel target");
+            std::abort();
+        }
         variables.push_back(assignment.target);
         for (const auto& term : assignment.expression.terms())
             variables.push_back(term.first);
@@ -751,19 +764,25 @@ void ConvexPolyhedraDomain::assignParallel(
     for (const LinearAssignment& assignment : assignments)
     {
         if (!layout_.contains(assignment.target))
-            throw std::invalid_argument(
-                "parallel assignment target is not in layout");
+        {
+            assert(false && "parallel assignment target is not in layout");
+            std::abort();
+        }
         if (!expressions.emplace(assignment.target, &assignment.expression)
                 .second)
-            throw std::invalid_argument(
-                "parallel assignment contains a duplicate target");
+        {
+            assert(false && "parallel assignment contains a duplicate target");
+            std::abort();
+        }
         for (const auto& [variable, coefficient] :
                 assignment.expression.terms())
         {
             (void)coefficient;
             if (!layout_.contains(variable))
-                throw std::invalid_argument(
-                    "parallel assignment expression uses an unknown variable");
+            {
+                assert(false && "parallel assignment expression uses an unknown variable");
+                std::abort();
+            }
         }
     }
     recordOperation(OperationKind::Assignment, ApproximationKind::Exact, true);
@@ -885,7 +904,10 @@ void ConvexPolyhedraDomain::substituteParallel(
     for (const auto& assignment : assignments)
     {
         if (!targets.insert(assignment.target).second)
-            throw std::invalid_argument("duplicate parallel target");
+        {
+            assert(false && "duplicate parallel target");
+            std::abort();
+        }
         variables.push_back(assignment.target);
         for (const auto& term : assignment.expression.terms())
             variables.push_back(term.first);
@@ -896,19 +918,25 @@ void ConvexPolyhedraDomain::substituteParallel(
     for (const LinearAssignment& assignment : assignments)
     {
         if (!layout_.contains(assignment.target))
-            throw std::invalid_argument(
-                "substitution target is not in layout");
+        {
+            assert(false && "substitution target is not in layout");
+            std::abort();
+        }
         if (!replacements.emplace(assignment.target, assignment.expression)
                 .second)
-            throw std::invalid_argument(
-                "parallel substitution contains a duplicate target");
+        {
+            assert(false && "parallel substitution contains a duplicate target");
+            std::abort();
+        }
         for (const auto& [variable, coefficient] :
                 assignment.expression.terms())
         {
             (void)coefficient;
             if (!layout_.contains(variable))
-                throw std::invalid_argument(
-                    "substitution expression uses an unknown variable");
+            {
+                assert(false && "substitution expression uses an unknown variable");
+                std::abort();
+            }
         }
     }
     recordOperation(OperationKind::Substitution, ApproximationKind::Exact,
@@ -1023,8 +1051,10 @@ void ConvexPolyhedraDomain::assume(const LinearConstraint& constraint)
             impl_->inequalities =
                 normalized(std::move(impl_->inequalities), impossible);
             if (impossible)
-                throw std::logic_error(
-                    "nonempty generator intersection has inconsistent H cache");
+            {
+                assert(false && "nonempty generator intersection has inconsistent H cache");
+                std::abort();
+            }
             impl_->constraintsMinimal = false;
         }
         else
@@ -1115,8 +1145,10 @@ void ConvexPolyhedraDomain::assumeAll(
                 impl_->inequalities = normalized(
                                           std::move(impl_->inequalities), impossible);
                 if (impossible)
-                    throw std::logic_error(
-                        "nonempty generator intersection has inconsistent H cache");
+                {
+                    assert(false && "nonempty generator intersection has inconsistent H cache");
+                    std::abort();
+                }
                 impl_->constraintsMinimal = false;
             }
             else
@@ -1167,7 +1199,10 @@ void ConvexPolyhedraDomain::forget(Variable variable)
         return;
 
     if (!layout_.contains(variable))
-        throw std::invalid_argument("forgotten variable is not in layout");
+    {
+        assert(false && "forgotten variable is not in layout");
+        std::abort();
+    }
     recordOperation(OperationKind::Forget, ApproximationKind::Exact, true);
     if (impl_->bottom)
         return;
@@ -1215,8 +1250,10 @@ void ConvexPolyhedraDomain::changeLayout(const DimensionLayout& layout)
     {
         if (layout_.contains(declaration.variable) &&
                 layout_.typeOf(declaration.variable) != declaration.variable.type())
-            throw std::invalid_argument(
-                "layout change modifies a variable's numeric type");
+        {
+            assert(false && "layout change modifies a variable's numeric type");
+            std::abort();
+        }
     }
     recordOperation(OperationKind::Canonicalization,
                     ApproximationKind::Exact, true);
@@ -1332,17 +1369,24 @@ void ConvexPolyhedraDomain::expandDimensions(
     Variable source, const std::vector<DimensionEntry>& copies)
 {
     if (!layout_.contains(source))
-        throw std::invalid_argument("expanded variable is not in layout");
+    {
+        assert(false && "expanded variable is not in layout");
+        std::abort();
+    }
     std::set<Variable> seen;
     for (const DimensionEntry& copy : copies)
     {
         if (layout_.contains(copy.variable) ||
                 !seen.insert(copy.variable).second)
-            throw std::invalid_argument(
-                "expanded variables must be new and unique");
+        {
+            assert(false && "expanded variables must be new and unique");
+            std::abort();
+        }
         if (copy.variable.type() != layout_.typeOf(source))
-            throw std::invalid_argument(
-                "expanded variables must have the source numeric type");
+        {
+            assert(false && "expanded variables must have the source numeric type");
+            std::abort();
+        }
     }
     if (copies.empty())
     {
@@ -1362,9 +1406,8 @@ void ConvexPolyhedraDomain::expandDimensions(
     const std::vector<Inequality> original = impl_->inequalities;
     std::vector<Inequality> expanded;
     expanded.reserve(original.size() * (copies.size() + 1));
-    // APRON expansion is the conjunction of one renamed copy of the original
-    // H system per representative. Building that fiber product in one batch
-    // avoids a complete H/V cycle for every new dimension.
+    // Conjoin one renamed constraint set per representative in one batch,
+    // avoiding a constraint/generator conversion for every new dimension.
     std::vector<Variable> representatives{source};
     representatives.reserve(copies.size() + 1);
     for (const DimensionEntry& copy : copies)
@@ -1393,7 +1436,10 @@ void ConvexPolyhedraDomain::expandDimensions(
     layout_ = expandedLayout;
     impl_->inequalities = normalized(std::move(expanded), impossible);
     if (impossible)
-        throw std::logic_error("expanding a feasible polyhedron became bottom");
+    {
+        assert(false && "expanding a feasible polyhedron became bottom");
+        std::abort();
+    }
     impl_->constraintsValid = true;
     impl_->constraintsMinimal = false;
     invalidateGenerators();
@@ -1408,18 +1454,25 @@ void ConvexPolyhedraDomain::fold(
     ensureVariables(variables);
 
     if (!layout_.contains(target))
-        throw std::invalid_argument("fold target is not in layout");
+    {
+        assert(false && "fold target is not in layout");
+        std::abort();
+    }
     std::set<Variable> seen;
     std::vector<Variable> sources{target};
     for (Variable variable : folded)
     {
         if (variable == target || !layout_.contains(variable) ||
                 !seen.insert(variable).second)
-            throw std::invalid_argument(
-                "folded variables must be distinct non-target dimensions");
+        {
+            assert(false && "folded variables must be distinct non-target dimensions");
+            std::abort();
+        }
         if (layout_.typeOf(variable) != layout_.typeOf(target))
-            throw std::invalid_argument(
-                "folded variables must have the target numeric type");
+        {
+            assert(false && "folded variables must have the target numeric type");
+            std::abort();
+        }
         sources.push_back(variable);
     }
     if (folded.empty())
@@ -1548,7 +1601,10 @@ Interval ConvexPolyhedraDomain::bound(Variable variable) const
         return Interval::top();
 
     if (!layout_.contains(variable))
-        throw std::invalid_argument("bounded variable is not in layout");
+    {
+        assert(false && "bounded variable is not in layout");
+        std::abort();
+    }
     if (impl_->bottom)
         return Interval(Bound::plusInfinity(), Bound::minusInfinity());
 
@@ -1608,8 +1664,10 @@ Interval ConvexPolyhedraDomain::bound(
     {
         (void)coefficient;
         if (!layout_.contains(variable))
-            throw std::invalid_argument(
-                "bounded expression uses an unknown variable");
+        {
+            assert(false && "bounded expression uses an unknown variable");
+            std::abort();
+        }
     }
     if (impl_->bottom)
         return Interval(Bound::plusInfinity(), Bound::minusInfinity());
@@ -1949,8 +2007,10 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::narrow(
     }
 
     if (next.isSubsetOf(*this) != CheckResult::True)
-        throw std::invalid_argument(
-            "narrowing requires next to be included in current");
+    {
+        assert(false && "narrowing requires next to be included in current");
+        std::abort();
+    }
     ConvexPolyhedraDomain result = meet(next);
     result.recordOperation(OperationKind::Narrowing,
                            ApproximationKind::Exact, true);
@@ -2056,8 +2116,10 @@ void ConvexPolyhedraDomain::meetDomain(const AbstractDomain& other)
             impl_->inequalities =
                 normalized(std::move(impl_->inequalities), impossible);
             if (impossible)
-                throw std::logic_error(
-                    "nonempty generator intersection has inconsistent H cache");
+            {
+                assert(false && "nonempty generator intersection has inconsistent H cache");
+                std::abort();
+            }
             impl_->constraintsMinimal = false;
         }
         else
@@ -2115,8 +2177,10 @@ void ConvexPolyhedraDomain::meetDomain(const AbstractDomain& other)
             impl_->inequalities =
                 normalized(std::move(impl_->inequalities), impossible);
             if (impossible)
-                throw std::logic_error(
-                    "nonempty generator intersection has inconsistent H cache");
+            {
+                assert(false && "nonempty generator intersection has inconsistent H cache");
+                std::abort();
+            }
             impl_->constraintsMinimal = false;
         }
         else
@@ -2240,8 +2304,10 @@ void ConvexPolyhedraDomain::ensureConstraints() const
     if (impl_->bottom || impl_->constraintsValid)
         return;
     if (!impl_->generatorsValid || !impl_->generatorsExact)
-        throw std::logic_error(
-            "polyhedron has no exact representation for H conversion");
+    {
+        assert(false && "polyhedron has no exact representation for H conversion");
+        std::abort();
+    }
 
     const bool convertedDual = !impl_->polarValid;
     GeneratorSystem minimizedPrimal;
@@ -2380,8 +2446,10 @@ void ConvexPolyhedraDomain::ensureGenerators() const
 void ConvexPolyhedraDomain::invalidateConstraints()
 {
     if (!impl_->generatorsValid || !impl_->generatorsExact)
-        throw std::logic_error(
-            "cannot invalidate constraints without an exact V representation");
+    {
+        assert(false && "cannot invalidate constraints without an exact V representation");
+        std::abort();
+    }
     impl_->inequalities.clear();
     impl_->constraintsValid = false;
     impl_->constraintsMinimal = false;
@@ -4039,7 +4107,10 @@ void ConvexPolyhedraDomain::expand(Variable source, const std::vector<Variable>&
     std::set<Variable> seen;
     for (Variable variable : copies)
         if (variable == source || variable.type() != source.type() || !seen.insert(variable).second)
-            throw std::invalid_argument("expand requires distinct, same-type copies");
+        {
+            assert(false && "expand requires distinct, same-type copies");
+            std::abort();
+        }
     // Copies are overwritten, just as in Box. A coordinate retained after a
     // previous forget must not change the meaning of a fresh expansion.
     changeLayout(layout_.remove(copies));
@@ -4062,7 +4133,10 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGenerators(
     for (auto& generator : ordered)
     {
         if (generator.coordinates.size() != variables.size())
-            throw std::invalid_argument("generator coordinate count does not match variables");
+        {
+            assert(false && "generator coordinate count does not match variables");
+            std::abort();
+        }
         const auto source = generator.coordinates;
         for (std::size_t i = 0; i < variables.size(); ++i)
             generator.coordinates[layout.dimensionOf(variables[i])] = source[i];

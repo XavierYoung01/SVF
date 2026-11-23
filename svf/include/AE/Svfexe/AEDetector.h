@@ -1,5 +1,4 @@
-//===- AEDetector.h -- Vulnerability
-// Detectors---------------------------------//
+//===- AEDetector.h -- Vulnerability Detectors---------------------------------//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -20,6 +19,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 //===----------------------------------------------------------------------===//
+
 
 //
 //  Created on: May 1, 2025
@@ -82,6 +82,9 @@ public:
      * @param node Pointer to the ICFG node.
      */
     virtual void detect(const ICFGNode* node) = 0;
+
+    /// Populate auxiliary data before checking final-state queries.
+    virtual void prepare(const ICFGNode*) {}
 
     /// Enumerate the detector's syntactic query scope before abstract
     /// interpretation so Safe/May/Unsupported results cannot change which
@@ -208,6 +211,8 @@ public:
      * @param node Pointer to the ICFG node.
      */
     void detect(const ICFGNode*) override;
+
+    void prepare(const ICFGNode*) override;
 
     void enumerateQueries() override;
 

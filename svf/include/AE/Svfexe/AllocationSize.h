@@ -23,6 +23,7 @@
 
 #include "Util/GeneralType.h"
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace SVF
@@ -30,9 +31,20 @@ namespace SVF
 class AddrStmt;
 class BaseObjVar;
 class CallICFGNode;
+class FunEntryICFGNode;
 class SVFIR;
 class SVFVar;
 class ValVar;
+
+struct MainArgumentEnvironment
+{
+    const FunEntryICFGNode* entry = nullptr;
+    const ValVar* argc = nullptr;
+    const ValVar* argv = nullptr;
+    const BaseObjVar* vector = nullptr;
+    const BaseObjVar* strings = nullptr;
+    const AddrStmt* vectorSite = nullptr;
+};
 
 /// Sparrow's Size(a) coordinate of one allocation site, in element units.
 /// The element count is `operand` (a syntactically stripped SSA value) or
@@ -56,6 +68,8 @@ struct AllocationSize
     u32_t unitBytes = 0;
     /// Multiplier removed between `sizeValue` and `operand`.
     s64_t strippedCoefficient = 1;
+    /// Logical element-count offset, independent of machine arithmetic.
+    s64_t elementOffset = 0;
     /// False: the site allocates an object with an unknown size (for
     /// example strdup or an unmodelled allocator). Size(o) is forgotten.
     bool known = false;
@@ -67,6 +81,7 @@ class AllocationSizeModel
 {
 public:
     explicit AllocationSizeModel(SVFIR& ir);
+    static std::optional<MainArgumentEnvironment> mainArguments(SVFIR& ir);
     const AllocationSize* find(const BaseObjVar* object) const;
     const AllocationSize* find(const AddrStmt* site) const;
     const std::vector<AllocationSize>& all() const

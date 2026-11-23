@@ -1,5 +1,4 @@
-//===- AEDetector.cpp -- Vulnerability
-// Detectors---------------------------------//
+//===- AEDetector.cpp -- Vulnerability Detectors---------------------------------//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -21,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+
 //
 //  Created on: May 1, 2025
 //      Author: Xiao Cheng, Jiawei Wang, Mingxiu Wang
@@ -30,6 +30,7 @@
 #include <AE/Svfexe/AbsExtAPI.h>
 #include "AE/Svfexe/AllocationSize.h"
 #include <limits>
+#include <set>
 #include <AE/Svfexe/AbstractInterpretation.h>
 
 using namespace SVF;
@@ -73,6 +74,58 @@ SVF::Interval detectorGepOffset(const GepStmt* gep)
         else return SVF::Interval::top();
     }
     return result;
+}
+
+SVF::Interval pointerOffsetFromBase(const SVFVar* pointer,
+                                  const BaseObjVar* base,
+                                  std::set<const SVFVar*>& active)
+{
+    if (!pointer || !active.insert(pointer).second)
+        return SVF::Interval::top();
+    SVF::Interval result = SVF::Interval::bottom();
+    bool defined = false;
+    for (const SVFStmt* statement : pointer->getInEdges())
+    {
+        if (SVFUtil::isa<StoreStmt>(statement))
+            continue;
+        defined = true;
+        SVF::Interval offset = SVF::Interval::top();
+        if (const auto* address = SVFUtil::dyn_cast<AddrStmt>(statement))
+        {
+            const auto* object = SVFUtil::dyn_cast<ObjVar>(address->getRHSVar());
+            const auto* origin = object ? PAG::getPAG()->getBaseObject(object->getId()) : nullptr;
+            if (origin && !origin->isBlackHoleObj())
+                offset = origin == base ? integerInterval(0) : SVF::Interval::bottom();
+        }
+        else if (const auto* gep = SVFUtil::dyn_cast<GepStmt>(statement))
+            offset = SVF::add(pointerOffsetFromBase(gep->getRHSVar(), base, active),
+                              detectorGepOffset(gep));
+        else if (const auto* copy = SVFUtil::dyn_cast<CopyStmt>(statement);
+                 copy && copy->getRHSVar()->isPointer())
+            offset = pointerOffsetFromBase(copy->getRHSVar(), base, active);
+        else if (const auto* call = SVFUtil::dyn_cast<CallPE>(statement))
+        {
+            offset = SVF::Interval::bottom();
+            for (u32_t i = 0; i < call->getOpVarNum(); ++i)
+                offset.joinWith(pointerOffsetFromBase(call->getOpVar(i), base, active));
+        }
+        else if (const auto* ret = SVFUtil::dyn_cast<RetPE>(statement))
+            offset = pointerOffsetFromBase(ret->getRHSVar(), base, active);
+        else if (const auto* phi = SVFUtil::dyn_cast<PhiStmt>(statement))
+        {
+            offset = SVF::Interval::bottom();
+            for (u32_t i = 0; i < phi->getOpVarNum(); ++i)
+                offset.joinWith(pointerOffsetFromBase(phi->getOpVar(i), base, active));
+        }
+        else if (const auto* select = SVFUtil::dyn_cast<SelectStmt>(statement))
+        {
+            offset = pointerOffsetFromBase(select->getTrueValue(), base, active);
+            offset.joinWith(pointerOffsetFromBase(select->getFalseValue(), base, active));
+        }
+        result.joinWith(offset);
+    }
+    active.erase(pointer);
+    return defined ? result : SVF::Interval::top();
 }
 
 /// Byte offset of a GEP as constant + scale * index with at most one
@@ -167,6 +220,19 @@ std::vector<u32_t> nullDerefArgumentIndices(const CallICFGNode* call)
  * @param as Reference to the abstract state.
  * @param node Pointer to the ICFG node.
  */
+void BufOverflowDetector::prepare(const ICFGNode* node)
+{
+    if (SVFUtil::isa<CallICFGNode>(node))
+        return;
+    auto& ae = AbstractInterpretation::getAEInstance();
+    for (const SVFStmt* statement : node->getSVFStmts())
+        if (const auto* gep = SVFUtil::dyn_cast<GepStmt>(statement))
+            updateGepObjOffsetFromBase(node,
+                ae.getAddressSet(gep->getLHSVar(), node),
+                ae.getAddressSet(gep->getRHSVar(), node),
+                detectorGepOffset(gep));
+}
+
 void BufOverflowDetector::detect(const ICFGNode* node)
 {
     auto& ae = AbstractInterpretation::getAEInstance();
@@ -197,7 +263,7 @@ void BufOverflowDetector::detect(const ICFGNode* node)
                 else for (SVF::Location location : rhsVal)
                     {
                         const ObjVar* object = ae.objectAt(location);
-                        if (!object)
+                        if (!object || ae.isFreedMemory(location, node))
                         {
                             unsupported = true;
                             continue;
@@ -412,9 +478,21 @@ void BufOverflowDetector::detectMemoryBounds(const SVFStmt* statement,
     const s64_t accessBytes = static_cast<s64_t>(statement->getAccessBytes());
     // D-005 item 7: a pointer formed by a GEP can be proved in bounds through
     // the relation idx - Size(o) of that GEP's base objects.
-    const auto* gep = pointer && pointer->getInEdges().size() == 1
-                      ? SVFUtil::dyn_cast<GepStmt>(*pointer->getInEdges().begin())
-                      : nullptr;
+    const GepStmt* gep = nullptr;
+    if (pointer)
+        for (const SVFStmt* incoming : pointer->getInEdges())
+        {
+            // A store uses its destination pointer; it does not define it.
+            if (SVFUtil::isa<StoreStmt>(incoming))
+                continue;
+            const auto* candidate = SVFUtil::dyn_cast<GepStmt>(incoming);
+            if (!candidate || gep)
+            {
+                gep = nullptr;
+                break;
+            }
+            gep = candidate;
+        }
     const auto provedThroughGep = [&](const BaseObjVar* base)
     {
         if (!gep)
@@ -457,6 +535,13 @@ void BufOverflowDetector::detectMemoryBounds(const SVFStmt* statement,
                     continue;
                 }
                 offset = getGepObjOffsetFromBase(field);
+            }
+            else
+            {
+                std::set<const SVFVar*> active;
+                offset = pointerOffsetFromBase(pointer, base, active);
+                if (offset.isBottom())
+                    offset = SVF::Interval::top();
             }
             checked = true;
             const SVF::Rational size(*lower);
@@ -1076,7 +1161,7 @@ bool BufOverflowDetector::canSafelyAccessMemory(const ValVar* value,
     for (SVF::Location location : ptrVal)
     {
         const ObjVar* mappedObject = ae.objectAt(location);
-        if (!mappedObject)
+        if (!mappedObject || ae.isFreedMemory(location, node))
             return false;
         NodeID objId = mappedObject->getId();
         const BaseObjVar* baseObject = svfir->getBaseObject(objId);

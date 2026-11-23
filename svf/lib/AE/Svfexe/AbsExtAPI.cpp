@@ -20,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+
 //
 //  Created on: Sep 9, 2024
 //      Author: Xiao Cheng, Jiawei Wang
@@ -93,6 +94,8 @@ void AbsExtAPI::initExtFunMap()
 
     auto sse_svf_assert = [this](const CallICFGNode* callNode)
     {
+        if (ae->intervalPreanalysis_)
+            return;
         checkpoints.erase(callNode);
         if (ae->isAssertionTrue(callNode->getArgument(0), callNode))
         {
@@ -117,6 +120,8 @@ void AbsExtAPI::initExtFunMap()
 
     auto svf_assert_eq = [this](const CallICFGNode* callNode)
     {
+        if (ae->intervalPreanalysis_)
+            return;
         const SVF::Interval arg0Val =
             ae->getInterval(callNode->getArgument(0), callNode);
         const SVF::Interval arg1Val =
@@ -393,6 +398,31 @@ void AbsExtAPI::handleExtAPI(const CallICFGNode* call)
 {
     const FunObjVar* fun = call->getCalledFunction();
     assert(fun && "FunObjVar* is nullptr");
+    const std::string& name = fun->getName();
+    if (Options::AESVComp() && name.compare(0, 18, "__VERIFIER_nondet_") == 0)
+    {
+        const RetICFGNode* returnSite = call->getRetICFGNode();
+        const auto* ret = returnSite && returnSite->getActualRet()
+                          ? SVFUtil::dyn_cast<ValVar>(returnSite->getActualRet())
+                          : nullptr;
+        const auto* type = ret ? SVFUtil::dyn_cast<SVFIntegerType>(ret->getType()) : nullptr;
+        if (type)
+        {
+            const std::string kind = name.substr(18);
+            const bool isUnsigned = kind == "uint" || kind == "unsigned" ||
+                                    kind == "uchar" || kind == "ushort" ||
+                                    kind == "ulong" || kind == "ulonglong" ||
+                                    kind == "uint128" || kind == "u32" ||
+                                    kind == "size_t";
+            const bool isSigned = kind == "char" ? type->isSigned() : !isUnsigned;
+            const Interval range = kind == "bool"
+                                   ? Interval::closed(Rational(0), Rational(1))
+                                   : integerRange(type->getByteSize() * 8, isSigned);
+            // Each execution produces a fresh value, including loop revisits.
+            ae->updateInterval(ret, range, call);
+            return;
+        }
+    }
     ExtAPIType extType = UNCLASSIFIED;
     // get type of mem api
     for (const std::string& annotation :
@@ -749,7 +779,7 @@ void AbsExtAPI::handleMemcpy(const ValVar* dst, const ValVar* src,
     // A later GEP must not discover an apparently uninitialized field after
     // this allocation has already been overwritten. Materialize the finite
     // canonical field universe before havoc, including currently unused cells.
-    if (!all && Options::AEDomain() == AbstractInterpretation::AENumericalDomain::Box)
+    if (!all && ae->numericalDomain() == AbstractInterpretation::AENumericalDomain::Box)
         for (NodeID baseId : bases)
         {
             const BaseObjVar* base = svfir->getBaseObject(baseId);
