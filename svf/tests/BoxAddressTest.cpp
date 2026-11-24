@@ -56,6 +56,11 @@ static void checkBox()
     reference.assignBound(otherPage, number(12));
     reference.assignBound(object, number(20));
 
+    const auto restored = NumericalDomain::deserializeRaw(reference.serializeRaw());
+    assert(restored->isEquivalentTo(reference) == CheckResult::True);
+    assert(restored->bound(value) == number(10));
+    assert(restored->bound(object) == number(20));
+
     for (BoxStorage values : layouts)
     {
         for (BoxStorage objects : layouts)

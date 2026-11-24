@@ -1241,10 +1241,17 @@ std::uint8_t configurationFlags(const NumericalDomain& state, DomainTag tag)
     std::abort();
 }
 
+// The high bit extends the numeric kind byte. Existing snapshots use the
+// original byte values and therefore restore their variables as Value.
+constexpr std::uint8_t ObjectContentFlag = 0x80;
+
 void writeVariable(Writer& writer, Variable variable)
 {
     writer.writeU32(variable.id());
-    writer.writeByte(encodeKind(variable.type().kind));
+    auto kind = encodeKind(variable.type().kind);
+    if (variable.role() == Variable::Role::ObjectContent)
+        kind |= ObjectContentFlag;
+    writer.writeByte(kind);
     writer.writeU32(variable.type().floatFormat.exponentBits);
     writer.writeU32(variable.type().floatFormat.significandBits);
 }
@@ -1253,10 +1260,12 @@ Variable readVariable(Reader& reader)
 {
     const std::uint32_t id = reader.readU32();
     NumericType type;
-    type.kind = decodeKind(reader.readByte());
+    const auto kind = reader.readByte();
+    type.kind = decodeKind(kind & ~ObjectContentFlag);
     type.floatFormat.exponentBits = reader.readU32();
     type.floatFormat.significandBits = reader.readU32();
-    return Variable(id, type);
+    return Variable(id, type, kind & ObjectContentFlag ? Variable::Role::ObjectContent
+                                                        : Variable::Role::Value);
 }
 
 void writeConstraints(Writer& writer, const LinearConstraintSet& constraints)
