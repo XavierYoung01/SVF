@@ -48,10 +48,10 @@ std::unique_ptr<NumericalDomain> cloneNumerical(
 
 BoxAddressDomain::BoxAddressDomain(
     std::unique_ptr<NumericalDomain> numerical, MemoryLayout memoryLayout,
-    bool trackInitialization)
+    bool trackInitialization, AddressSetStorage addressStorage)
     : numerical_(std::move(numerical)),
       memoryLayout_(std::move(memoryLayout)),
-      addresses_(AddressDomain::top()), lifetimes_(LifetimeDomain::bottom()),
+      addresses_(AddressDomain::top(addressStorage)), lifetimes_(LifetimeDomain::bottom()),
       trackInitialization_(trackInitialization)
 {
     if (!numerical_)
@@ -208,7 +208,8 @@ bool BoxAddressDomain::hasSameValues(const BoxAddressDomain& other) const
                 while (bits)
                 {
                     const Variable variable(entry.key.id() * InitializationDomain::ValuesPerPage +
-                                            countTrailingZeros(bits), entry.key.type());
+                                            countTrailingZeros(bits), entry.key.type(),
+                                            entry.key.role());
                     if (compare ? !hasSameValue(variable, other)
                                 : (!hasValue(variable) && other.hasValue(variable)))
                         return false;
@@ -340,76 +341,11 @@ BoxAddressDomain BoxAddressDomain::withoutValues(
         return *this;
 
     const auto& numbers = static_cast<const BoxDomain&>(*numerical_);
-    BoxAddressDomain result(BoxDomain::top(numbers.config()), memoryLayout_,
+    BoxAddressDomain result(numbers.withoutBounds(omitted), memoryLayout_,
                             trackInitialization_);
     result.lifetimes_ = lifetimes_;
-    auto& selectedNumbers = static_cast<BoxDomain&>(*result.numerical_);
-    selectedNumbers.boundPages_.reserve(numbers.boundPages_.size());
-    for (const auto& entry : numbers.boundPages_)
-    {
-        std::shared_ptr<BoxDomain::BoundPage> selected;
-        for (std::size_t i = 0; i < BoxDomain::BoundsPerPage; ++i)
-        {
-            const auto& slot = entry.page->bounds[i];
-            if (slot && omitted.count(slot->variable))
-            {
-                if (!selected)
-                    selected = std::make_shared<BoxDomain::BoundPage>(*entry.page);
-                selected->bounds[i].reset();
-            }
-        }
-        if (!selected)
-            selectedNumbers.boundPages_.push_back(entry);
-        else if (!BoxDomain::pageIsEmpty(*selected))
-            selectedNumbers.boundPages_.push_back({entry.index, std::move(selected)});
-    }
 
-    auto& pointers = result.addresses_;
-    if (!addresses_.paged_)
-    {
-        pointers.smallValues_ = addresses_.smallValues_;
-        pointers.size_ = addresses_.size_;
-        const auto& values = *addresses_.smallValues_;
-        const auto first = std::find_if(values.begin(), values.end(),
-                                        [&](const auto& value)
-        {
-            return omitted.count(value.first);
-        });
-        if (first != values.end())
-        {
-            pointers.smallValues_ = std::make_shared<AddressDomain::SmallValues>(
-                                        values.begin(), first);
-            for (auto it = first; it != values.end(); ++it)
-                if (!omitted.count(it->first))
-                    pointers.smallValues_->push_back(*it);
-            pointers.size_ = pointers.smallValues_->size();
-        }
-    }
-    else
-    {
-        pointers.paged_ = true;
-        pointers.size_ = addresses_.size_;
-        pointers.pages_.reserve(addresses_.pages_.size());
-        for (const auto& entry : addresses_.pages_)
-        {
-            std::shared_ptr<AddressDomain::ValuePage> selected;
-            for (std::size_t i = 0; i < AddressDomain::ValuesPerPage; ++i)
-            {
-                const auto& slot = entry.page->values[i];
-                if (slot && omitted.count(slot->variable))
-                {
-                    if (!selected)
-                        selected = std::make_shared<AddressDomain::ValuePage>(*entry.page);
-                    selected->values[i].reset();
-                    --pointers.size_;
-                }
-            }
-            if (!selected)
-                pointers.pages_.push_back(entry);
-            else if (!AddressDomain::pageIsEmpty(*selected))
-                pointers.pages_.push_back({entry.index, std::move(selected)});
-        }
-    }
+    result.addresses_ = addresses_.without(omitted);
 
     const auto selectInitialization = [&](const InitializationDomain& source)
     {
@@ -424,7 +360,7 @@ BoxAddressDomain BoxAddressDomain::withoutValues(
                     variable != omitted.end() &&
                     variable->id() < first + InitializationDomain::ValuesPerPage;
                     ++variable)
-                if (variable->type() == it->key.type())
+                if (variable->type() == it->key.type() && variable->role() == it->key.role())
                     mask |= std::uint64_t{1} << (variable->id() % InitializationDomain::ValuesPerPage);
             const auto& page = *it->page;
             if (!((page.uninitialized | page.initialized) & mask))
@@ -953,7 +889,7 @@ InitializationState InitializationDomain::defaultState() const
 
 InitializationState InitializationDomain::value(Variable variable) const
 {
-    const Variable key(variable.id() / ValuesPerPage, variable.type());
+    const Variable key(variable.id() / ValuesPerPage, variable.type(), variable.role());
     const auto it = std::lower_bound(pages_->begin(), pages_->end(), key,
                                      [](const PageEntry& entry, Variable target)
     {
@@ -983,7 +919,7 @@ void InitializationDomain::assign(Variable variable, InitializationState state)
     }
     if (pages_.use_count() != 1)
         pages_ = std::make_shared<Directory>(*pages_);
-    const Variable key(variable.id() / ValuesPerPage, variable.type());
+    const Variable key(variable.id() / ValuesPerPage, variable.type(), variable.role());
     auto it = std::lower_bound(pages_->begin(), pages_->end(), key,
                                [](const PageEntry& entry, Variable target)
     {
@@ -1035,7 +971,8 @@ std::vector<Variable> InitializationDomain::nonDefaultVariables(
             while (bits)
             {
                 const auto slot = countTrailingZeros(bits);
-                const Variable variable(index * ValuesPerPage + slot, it->key.type());
+                const Variable variable(index * ValuesPerPage + slot, it->key.type(),
+                                        it->key.role());
                 if (upperBound && !(variable < *upperBound))
                     break;
                 variables.push_back(variable);
@@ -1045,8 +982,8 @@ std::vector<Variable> InitializationDomain::nonDefaultVariables(
             ++it;
         }
         while (it != pages_->end() && it->key.id() == index);
-        // Different types can share the same numeric ID. Preserve the public
-        // Variable ordering (ID first), not the internal page/type ordering.
+        // Preserve the public ID order when a page index has multiple
+        // type and role groups.
         if (types > 1)
             std::sort(variables.begin() + first, variables.end());
     }

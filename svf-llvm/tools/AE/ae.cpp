@@ -31,10 +31,10 @@
 #include "Util/Options.h"
 #include "WPA/Andersen.h"
 
+#include "AE/Core/AbstractState.h"
 #include "AE/Core/RelExeState.h"
 #include "AE/Core/RelationSolver.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include "AE/Core/AbstractState.h"
 #include <chrono>
 #include <limits>
 
@@ -903,22 +903,26 @@ public:
         assert((IntervalValue(-6, 6) ^ IntervalValue(3, 9)).equals(IntervalValue::top()));
     }
 
-    void testAbsState()
+    void testLoadAndStore()
     {
-        AbstractState as;
-        as[1] = IntervalValue(1, 3);
-        as[2] = IntervalValue(2, 7);
-        as[3] = AddressValue(0x7f000007);
-        as[4] = AddressValue(0x7f000008);
-        // store: *as[3] = as[1], *as[4] = as[2]
-        for (auto addr : as[3].getAddrs()) as.store(addr, as[1]);
-        for (auto addr : as[4].getAddrs()) as.store(addr, as[2]);
-        as.printAbstractState();
-        // load: verify *as[3] == as[1] && *as[4] == as[2]
-        AbstractValue v3, v4;
-        for (auto addr : as[3].getAddrs()) v3.join_with(as.load(addr));
-        for (auto addr : as[4].getAddrs()) v4.join_with(as.load(addr));
-        assert(v3.equals(as[1]) && v4.equals(as[2]));
+        const Variable sourceA(1), sourceB(2), pointerA(3), pointerB(4);
+        const Variable contentA(7, NumericType::integer(), Variable::Role::ObjectContent);
+        const Variable contentB(8, NumericType::integer(), Variable::Role::ObjectContent);
+        const Location cellA(7), cellB(8);
+        const Interval intervalA = Interval::closed(Rational(1), Rational(3));
+        const Interval intervalB = Interval::closed(Rational(2), Rational(7));
+        BoxAddressDomain state(BoxDomain::top(), MemoryLayout({{cellA, contentA},
+                                                              {cellB, contentB}}));
+        state.setInterval(sourceA, intervalA);
+        state.setInterval(sourceB, intervalB);
+        state.setAddressSet(pointerA, AddressSet::singleton(cellA));
+        state.setAddressSet(pointerB, AddressSet::singleton(cellB));
+        state.assignMemory(cellA, sourceA);
+        state.assignMemory(cellB, sourceB);
+        state.load(Variable(5), pointerA);
+        state.load(Variable(6), pointerB);
+        assert(state.interval(Variable(5)) == intervalA);
+        assert(state.interval(Variable(6)) == intervalB);
     }
 };
 
@@ -956,7 +960,7 @@ int main(int argc, char** argv)
         aeTest.testBoundedIntBoundaryArithmetic();
         aeTest.testIntervalBoundaryArithmetic();
         aeTest.testBinaryOpStmt();
-        aeTest.testAbsState();
+        aeTest.testLoadAndStore();
         return 0;
     }
 

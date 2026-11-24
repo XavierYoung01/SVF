@@ -689,9 +689,11 @@ private:
     }
 
     inline NodeID addConstantIntValNode(NodeID i, const std::pair<s64_t, u64_t>& intValue,
-                                        const ICFGNode* icfgNode, const SVFType* type)
+                                        const ICFGNode* icfgNode, const SVFType* type,
+                                        IntegerLiteral literal = {})
     {
-        SVFVar* node = new ConstIntValVar(i, intValue.first, intValue.second, icfgNode, type);
+        SVFVar* node = new ConstIntValVar(i, intValue.first, intValue.second,
+                                         icfgNode, type, std::move(literal));
         return addNode(node);
     }
 
@@ -752,10 +754,12 @@ private:
     }
 
 
-    inline NodeID addConstantIntObjNode(NodeID i, ObjTypeInfo* ti, const std::pair<s64_t, u64_t>& intValue, const ICFGNode* node)
+    inline NodeID addConstantIntObjNode(NodeID i, ObjTypeInfo* ti,
+                                        const std::pair<s64_t, u64_t>& intValue,
+                                        const ICFGNode* node, IntegerLiteral literal = {})
     {
-        ConstIntObjVar* conObj =
-            new ConstIntObjVar(i, intValue.first, intValue.second, ti, node);
+        ConstIntObjVar* conObj = new ConstIntObjVar(i, intValue.first, intValue.second,
+                                                  ti, node, std::move(literal));
         return addBaseObjNode(conObj);
     }
 

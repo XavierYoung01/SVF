@@ -26,21 +26,18 @@
 
 #include "AE/Core/BoxAddressDomain.h"
 
-#include <cstdint>
-#include <map>
-#include <set>
-#include <vector>
+#include "Util/GeneralType.h"
 
 namespace SVF
 {
 
-class FunObjVar;
+class ConstIntObjVar;
+class ConstIntValVar;
 class ObjVar;
 class PAG;
 class ValVar;
 
-/// Owns the IR-specific identity mapping. Abstract-domain states only see
-/// Variable and Location; they never depend on SVF NodeID or PAG classes.
+/// Translate frontend types while preserving the PAG identity in each key.
 class SVFIRAdapter
 {
 public:
@@ -49,21 +46,18 @@ public:
     /// PAG's double projection can overflow for extended FP constants.
     /// Such values have no rational singleton; retain an unconstrained number.
     static SVF::Interval floatingConstant(double value);
+    static SVF::Rational integerConstant(const ConstIntValVar& value);
+    static SVF::Rational integerConstant(const ConstIntObjVar& value);
 
     bool contains(const ValVar& value) const;
-    bool contains(const ObjVar& object) const;
+    bool isScalar(SVF::Variable variable) const;
 
     SVF::Variable variable(const ValVar& value) const;
     const ValVar* value(SVF::Variable variable) const;
     SVF::Location location(const ObjVar& object) const;
     SVF::Variable contentVariable(const ObjVar& object) const;
-    const ObjVar* contentObject(SVF::Variable variable) const;
-    bool isPointer(SVF::Variable variable) const;
     const ObjVar& object(SVF::Location location) const;
-    SVF::Variable firstObjectContentVariable() const
-    {
-        return SVF::Variable(firstObjectContentVariableId_);
-    }
+    void registerObject(const ObjVar& object) const;
 
     const SVF::MemoryLayout& memoryLayout() const
     {
@@ -71,19 +65,8 @@ public:
     }
 
 private:
-    void registerObject(const ObjVar& object) const;
-
-    std::map<const ValVar*, SVF::Variable> variables_;
-    std::vector<const ValVar*> valuesByVariableId_;
-    mutable std::map<const ObjVar*, SVF::Location> locations_;
-    mutable std::map<SVF::Location, const ObjVar*> objects_;
-    mutable std::map<const ObjVar*, SVF::Variable>
-    contentVariables_;
-    mutable std::vector<const ObjVar*> contentObjectsByVariableId_;
+    const PAG& pag_;
     mutable SVF::MemoryLayout memoryLayout_;
-    mutable std::uint64_t nextVariableId_ = 1;
-    mutable std::uint64_t nextLocationId_ = 1;
-    std::uint32_t firstObjectContentVariableId_ = 1;
 };
 
 } // namespace SVF

@@ -218,11 +218,15 @@ class BoxAddressDomain final : public AbstractDomain
 public:
     BoxAddressDomain(std::unique_ptr<NumericalDomain> numerical,
                      MemoryLayout memoryLayout,
-                     bool trackInitialization = false);
+                     bool trackInitialization = false,
+                     AddressSetStorage addressStorage =
+                         AddressSetStorage::OneWithSharedOverflow);
     BoxAddressDomain(BoxDomain numerical, MemoryLayout memoryLayout,
-                     bool trackInitialization = false)
+                     bool trackInitialization = false,
+                     AddressSetStorage addressStorage =
+                         AddressSetStorage::OneWithSharedOverflow)
         : BoxAddressDomain(std::make_unique<BoxDomain>(std::move(numerical)),
-                           std::move(memoryLayout), trackInitialization)
+                           std::move(memoryLayout), trackInitialization, addressStorage)
     {
     }
 

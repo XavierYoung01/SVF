@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "AE/Core/NumericalDomain.h"
+#include "AE/Core/CheckedInt64.h"
 #include "AE/Core/OctagonDomain.h"
 #include "AE/Core/ConvexPolyhedraDomain.h"
 
@@ -135,16 +136,56 @@ void NumericalDomain::recordRelationalClosureIndexedQuery() const
         ++telemetry.relationalClosureIndexedQueries;
 }
 
+namespace
+{
+
+mpz_class importInt64(std::int64_t value)
+{
+    if constexpr (sizeof(long) >= sizeof(value))
+        return mpz_class(static_cast<long>(value));
+
+    const auto bits = static_cast<std::uint64_t>(value);
+    const std::uint64_t magnitude = value < 0 ? std::uint64_t{0} - bits : bits;
+    mpz_class result;
+    mpz_import(result.get_mpz_t(), 1, 1, sizeof(magnitude), 0, 0, &magnitude);
+    if (value < 0)
+        mpz_neg(result.get_mpz_t(), result.get_mpz_t());
+    return result;
+}
+
+bool exportInt64(mpz_srcptr value, std::int64_t& result)
+{
+    if constexpr (sizeof(long) == sizeof(result))
+    {
+        if (!mpz_fits_slong_p(value))
+            return false;
+        result = static_cast<std::int64_t>(mpz_get_si(value));
+        return true;
+    }
+
+    if (mpz_sizeinbase(value, 2) > 64)
+        return false;
+    std::uint64_t magnitude = 0;
+    mpz_export(&magnitude, nullptr, 1, sizeof(magnitude), 0, 0, value);
+    constexpr auto minimumMagnitude = std::uint64_t{1} << 63;
+    if (magnitude < minimumMagnitude)
+    {
+        result = static_cast<std::int64_t>(magnitude);
+        if (mpz_sgn(value) < 0)
+            result = -result;
+        return true;
+    }
+    if (magnitude != minimumMagnitude || mpz_sgn(value) >= 0)
+        return false;
+    result = std::numeric_limits<std::int64_t>::min();
+    return true;
+}
+
+} // namespace
+
 Integer::Integer() : value_(0) {}
 
-Integer::Integer(std::int64_t value)
-{
-    if (mpz_set_str(value_.get_mpz_t(), std::to_string(value).c_str(), 10) != 0)
-    {
-        assert(false && "invalid 64-bit integer");
-        std::abort();
-    }
-}
+Integer::Integer(std::int64_t value) : value_(importInt64(value)) {}
 
 Integer::Integer(const std::string& value)
 {
@@ -160,31 +201,22 @@ std::string Integer::toString() const
     return value_.get_str();
 }
 
-Rational::Rational() : value_(0) {}
-
-Rational::Rational(std::int64_t value)
+Rational::Rational(const Integer& value)
 {
-    mpz_class integer;
-    if (mpz_set_str(integer.get_mpz_t(), std::to_string(value).c_str(), 10) !=
-            0)
-    {
-        assert(false && "invalid 64-bit rational integer");
-        std::abort();
-    }
-    mpq_set_z(value_.get_mpq_t(), integer.get_mpz_t());
+    storeCanonical(mpq_class(value.value()));
 }
-
-Rational::Rational(const Integer& value) : value_(value.value()) {}
 
 Rational::Rational(const std::string& value)
 {
-    if (mpq_set_str(value_.get_mpq_t(), value.c_str(), 0) != 0 ||
-            mpz_sgn(mpq_denref(value_.get_mpq_t())) == 0)
+    mpq_class parsed;
+    if (mpq_set_str(parsed.get_mpq_t(), value.c_str(), 0) != 0 ||
+            mpz_sgn(mpq_denref(parsed.get_mpq_t())) == 0)
     {
         assert(false && "invalid rational string");
         std::abort();
     }
-    value_.canonicalize();
+    parsed.canonicalize();
+    storeCanonical(std::move(parsed));
 }
 
 Rational::Rational(const Integer& numerator, const Integer& denominator)
@@ -194,19 +226,31 @@ Rational::Rational(const Integer& numerator, const Integer& denominator)
         assert(false && "a rational denominator cannot be zero");
         std::abort();
     }
-    mpq_set_num(value_.get_mpq_t(), numerator.value().get_mpz_t());
-    mpq_set_den(value_.get_mpq_t(), denominator.value().get_mpz_t());
-    value_.canonicalize();
+    mpq_class result;
+    mpq_set_num(result.get_mpq_t(), numerator.value().get_mpz_t());
+    mpq_set_den(result.get_mpq_t(), denominator.value().get_mpz_t());
+    result.canonicalize();
+    storeCanonical(std::move(result));
 }
 
-Rational::Rational(mpq_class value, int) : value_(std::move(value))
+void Rational::storeCanonical(mpq_class value)
 {
-    value_.canonicalize();
+    const auto numerator = mpq_numref(value.get_mpq_t());
+    const auto denominator = mpq_denref(value.get_mpq_t());
+    std::int64_t small;
+    if (mpz_cmp_ui(denominator, 1) == 0 && exportInt64(numerator, small))
+        storage_ = small;
+    else
+        storage_ = std::move(value);
 }
 
 Rational Rational::fromRaw(const mpq_class& value)
 {
-    return Rational(value, 0);
+    mpq_class canonical = value;
+    canonical.canonicalize();
+    Rational result;
+    result.storeCanonical(std::move(canonical));
+    return result;
 }
 
 Rational Rational::fromDouble(double value)
@@ -216,104 +260,193 @@ Rational Rational::fromDouble(double value)
         assert(false && "a non-finite floating value is not rational");
         std::abort();
     }
+    if (value >= -0x1p63 && value < 0x1p63 && std::trunc(value) == value)
+        return Rational(static_cast<std::int64_t>(value));
+
     mpq_class rational;
     mpq_set_d(rational.get_mpq_t(), value);
-    rational.canonicalize();
     return fromRaw(rational);
+}
+
+Rational Rational::fromIntegerBits(const std::uint64_t* words,
+                                   unsigned bitWidth, bool signedValue)
+{
+    assert(bitWidth > 0);
+    const auto signWord = (bitWidth - 1) / 64;
+    const auto signMask = std::uint64_t{1} << ((bitWidth - 1) % 64);
+    mpz_class magnitude;
+    mpz_import(magnitude.get_mpz_t(), signWord + 1, -1, sizeof(*words), 0, 0,
+               words);
+    mpz_fdiv_r_2exp(magnitude.get_mpz_t(), magnitude.get_mpz_t(), bitWidth);
+    if (signedValue && (words[signWord] & signMask))
+        magnitude -= mpz_class(1) << bitWidth;
+    Rational result;
+    result.storeCanonical(mpq_class(std::move(magnitude)));
+    return result;
+}
+
+int Rational::compare(const Rational& lhs, const Rational& rhs)
+{
+    const auto* left = lhs.inlineInteger();
+    const auto* right = rhs.inlineInteger();
+    if (left && right)
+        return (*left > *right) - (*left < *right);
+    if constexpr (sizeof(long) >= sizeof(std::int64_t))
+    {
+        if (left)
+            return -mpq_cmp_si(rhs.large().get_mpq_t(), static_cast<long>(*left), 1);
+        if (right)
+            return mpq_cmp_si(lhs.large().get_mpq_t(), static_cast<long>(*right), 1);
+    }
+    if (left)
+        return mpq_cmp(lhs.value().get_mpq_t(), rhs.large().get_mpq_t());
+    if (right)
+        return mpq_cmp(lhs.large().get_mpq_t(), rhs.value().get_mpq_t());
+    return mpq_cmp(lhs.large().get_mpq_t(), rhs.large().get_mpq_t());
+}
+
+mpq_class Rational::value() const
+{
+    if (const auto* small = inlineInteger())
+    {
+        if constexpr (sizeof(long) >= sizeof(*small))
+            return mpq_class(static_cast<long>(*small));
+        return mpq_class(importInt64(*small));
+    }
+    return large();
 }
 
 std::string Rational::toString() const
 {
-    return value_.get_str();
+    if (const auto* small = inlineInteger())
+        return std::to_string(*small);
+    return large().get_str();
 }
 
 bool Rational::isInteger() const
 {
-    return mpz_cmp_ui(mpq_denref(value_.get_mpq_t()), 1U) == 0;
+    return inlineInteger() || mpz_cmp_ui(mpq_denref(large().get_mpq_t()), 1) == 0;
 }
 
 bool Rational::tryToInt64(std::int64_t& result) const
 {
-    if (!isInteger())
+    const auto* small = inlineInteger();
+    if (!small)
         return false;
-    const std::string encoded =
-        mpz_class(mpq_numref(value_.get_mpq_t())).get_str();
-    std::int64_t parsed = 0;
-    const auto conversion = std::from_chars(
-                                encoded.data(), encoded.data() + encoded.size(), parsed);
-    if (conversion.ec != std::errc() ||
-            conversion.ptr != encoded.data() + encoded.size())
-        return false;
-    result = parsed;
+    result = *small;
     return true;
 }
 
 std::int64_t Rational::toInt64() const
 {
-    std::int64_t result = 0;
-    if (!tryToInt64(result))
-    {
-        assert(false && "rational is not an int64 integer");
-        std::abort();
-    }
-    return result;
+    if (const auto* small = inlineInteger())
+        return *small;
+    assert(false && "rational is not an int64 integer");
+    std::abort();
 }
 
 double Rational::toDouble() const
 {
-    return mpq_get_d(value_.get_mpq_t());
+    if (const auto* small = inlineInteger())
+    {
+        constexpr std::int64_t Exact = std::int64_t{1} << 53;
+        if (*small >= -Exact && *small <= Exact)
+            return static_cast<double>(*small);
+        return value().get_d();
+    }
+    return large().get_d();
 }
 
 Rational Rational::floor() const
 {
+    if (inlineInteger())
+        return *this;
     mpz_class result;
-    mpz_fdiv_q(result.get_mpz_t(), mpq_numref(value_.get_mpq_t()),
-               mpq_denref(value_.get_mpq_t()));
-    return Rational::fromRaw(mpq_class(result));
+    mpz_fdiv_q(result.get_mpz_t(), mpq_numref(large().get_mpq_t()),
+               mpq_denref(large().get_mpq_t()));
+    Rational rounded;
+    rounded.storeCanonical(mpq_class(result));
+    return rounded;
 }
 
 Rational Rational::ceil() const
 {
+    if (inlineInteger())
+        return *this;
     mpz_class result;
-    mpz_cdiv_q(result.get_mpz_t(), mpq_numref(value_.get_mpq_t()),
-               mpq_denref(value_.get_mpq_t()));
-    return Rational::fromRaw(mpq_class(result));
+    mpz_cdiv_q(result.get_mpz_t(), mpq_numref(large().get_mpq_t()),
+               mpq_denref(large().get_mpq_t()));
+    Rational rounded;
+    rounded.storeCanonical(mpq_class(result));
+    return rounded;
 }
 
 Rational Rational::dividedByPowerOfTwo(unsigned exponent) const
 {
-    Rational result;
-    mpq_div_2exp(result.value_.get_mpq_t(), value_.get_mpq_t(), exponent);
-    return result;
+    Rational result = *this;
+    return result.divideByPowerOfTwoInPlace(exponent);
 }
 
 Rational& Rational::assignSum(const Rational& lhs, const Rational& rhs)
 {
-    mpq_add(value_.get_mpq_t(), lhs.value_.get_mpq_t(), rhs.value_.get_mpq_t());
+    const auto* left = lhs.inlineInteger();
+    const auto* right = rhs.inlineInteger();
+    std::int64_t result;
+    if (left && right && CheckedInt64::add(*left, *right, result))
+        storage_ = result;
+    else
+        storeCanonical(mpq_class(lhs.value() + rhs.value()));
     return *this;
 }
 
 Rational& Rational::divideByPowerOfTwoInPlace(unsigned exponent)
 {
-    mpq_div_2exp(value_.get_mpq_t(), value_.get_mpq_t(), exponent);
+    if (const auto* small = inlineInteger())
+    {
+        if (*small == 0 || exponent == 0)
+            return *this;
+        if (exponent < 63)
+        {
+            const auto divisor = std::int64_t{1} << exponent;
+            if (*small % divisor == 0)
+            {
+                storage_ = *small / divisor;
+                return *this;
+            }
+        }
+    }
+    mpq_class result = value();
+    mpq_div_2exp(result.get_mpq_t(), result.get_mpq_t(), exponent);
+    storeCanonical(std::move(result));
     return *this;
 }
 
 Rational& Rational::operator+=(const Rational& rhs)
 {
-    value_ += rhs.value_;
-    return *this;
+    return assignSum(*this, rhs);
 }
 
 Rational& Rational::operator-=(const Rational& rhs)
 {
-    value_ -= rhs.value_;
+    const auto* left = inlineInteger();
+    const auto* right = rhs.inlineInteger();
+    std::int64_t result;
+    if (left && right && CheckedInt64::sub(*left, *right, result))
+        storage_ = result;
+    else
+        storeCanonical(mpq_class(value() - rhs.value()));
     return *this;
 }
 
 Rational& Rational::operator*=(const Rational& rhs)
 {
-    value_ *= rhs.value_;
+    const auto* left = inlineInteger();
+    const auto* right = rhs.inlineInteger();
+    std::int64_t result;
+    if (left && right && CheckedInt64::mul(*left, *right, result))
+        storage_ = result;
+    else
+        storeCanonical(mpq_class(value() * rhs.value()));
     return *this;
 }
 
@@ -324,8 +457,20 @@ Rational& Rational::operator/=(const Rational& rhs)
         assert(false && "division by zero rational");
         std::abort();
     }
-    value_ /= rhs.value_;
+    const auto* left = inlineInteger();
+    const auto* right = rhs.inlineInteger();
+    std::int64_t result;
+    if (left && right && CheckedInt64::div(*left, *right, result) &&
+            result * *right == *left)
+        storage_ = result;
+    else
+        storeCanonical(mpq_class(value() / rhs.value()));
     return *this;
+}
+
+Rational operator-(const Rational& value)
+{
+    return Rational() - value;
 }
 
 Bound::Bound() = default;
@@ -1913,6 +2058,16 @@ Interval integerRange(unsigned bitWidth, bool isSigned)
         std::abort();
     }
 
+    if (isSigned && bitWidth == 64)
+        return Interval::closed(Rational(CheckedInt64::Min), Rational(CheckedInt64::Max));
+    const unsigned magnitudeBits = isSigned ? bitWidth - 1 : bitWidth;
+    if (magnitudeBits < 63)
+    {
+        const auto magnitude = std::int64_t{1} << magnitudeBits;
+        return Interval::closed(Rational(isSigned ? -magnitude : 0),
+                                Rational(magnitude - 1));
+    }
+
     mpz_class magnitude = 1;
     mpz_mul_2exp(magnitude.get_mpz_t(), magnitude.get_mpz_t(),
                  isSigned ? bitWidth - 1 : bitWidth);
@@ -1929,9 +2084,12 @@ Interval wrapIntegerInterval(const Interval& operand, unsigned bitWidth,
         return Interval::bottom();
     const Interval range = integerRange(bitWidth, isSigned);
     if (!operand.lower().isFinite() || !operand.upper().isFinite() ||
-            operand.lower().isStrict() || operand.upper().isStrict() ||
             !operand.lower().value().isInteger() ||
             !operand.upper().value().isInteger())
+        return range;
+    if (operand.isSubsetOf(range))
+        return operand;
+    if (operand.lower().isStrict() || operand.upper().isStrict())
         return range;
 
     const mpz_class lower(
@@ -1966,25 +2124,9 @@ Interval wrapIntegerInterval(const Interval& operand, unsigned bitWidth,
 Interval zeroExtendIntegerInterval(const Interval& operand,
                                    unsigned sourceBitWidth, bool sourceIsSigned)
 {
-    if (operand.isBottom())
-        return Interval::bottom();
-    const Interval sourceRange = integerRange(sourceBitWidth, sourceIsSigned);
-    const Interval unsignedRange = integerRange(sourceBitWidth, false);
-    if (!operand.isSubsetOf(sourceRange) || !operand.lower().isFinite() ||
-            !operand.upper().isFinite() || operand.lower().isStrict() ||
-            operand.upper().isStrict() || !operand.lower().value().isInteger() ||
-            !operand.upper().value().isInteger())
-        return unsignedRange;
-    if (!sourceIsSigned || operand.lower().value().sign() >= 0)
-        return operand;
-    if (operand.upper().value().sign() >= 0)
-        return unsignedRange;
-
-    mpz_class modulus = 1;
-    mpz_mul_2exp(modulus.get_mpz_t(), modulus.get_mpz_t(), sourceBitWidth);
-    const Rational offset = Rational::fromRaw(mpq_class(modulus));
-    return Interval::closed(operand.lower().value() + offset,
-                            operand.upper().value() + offset);
+    // The source's signed interpretation affects the encoding, not the bits.
+    (void)sourceIsSigned;
+    return wrapIntegerInterval(operand, sourceBitWidth, false);
 }
 
 Interval floatToInteger(const Interval& operand, unsigned bitWidth,
@@ -2747,15 +2889,12 @@ LinearConstraint normalizedLessEqual(const LinearConstraint& constraint,
 } // namespace
 
 BoxDomain::BoxDomain(BoxSemanticConfig config, bool bottom)
-    : config_(std::move(config)), bottom_(bottom)
+    : config_(std::move(config)), values_(config_.storage.values),
+      objectContents_(config_.storage.objectContents), bottom_(bottom)
 {
 }
 
-BoxDomain::BoxDomain(const BoxDomain& other)
-    : NumericalDomain(other), config_(other.config_),
-      boundPages_(other.boundPages_), bottom_(other.bottom_)
-{
-}
+BoxDomain::BoxDomain(const BoxDomain& other) = default;
 
 BoxDomain BoxDomain::top(const BoxSemanticConfig& config)
 {
@@ -3018,7 +3157,7 @@ std::vector<Variable> BoxDomain::constrainedVariablesBefore(
 {
     if (bottom_)
         return {};
-    return boundedVariablesBefore(upperBound.id());
+    return boundedVariablesBefore(upperBound);
 }
 
 void BoxDomain::expand(Variable source, const std::vector<Variable>& copies)
@@ -3235,7 +3374,8 @@ BoxDomain BoxDomain::widen(const BoxDomain& next,
     requireBox(next);
     if (bottom_)
     {
-        BoxDomain result(next);
+        BoxDomain result(*this);
+        result.joinDomain(next);
         result.recordOperation(OperationKind::Widening,
                                ApproximationKind::SoundOverApproximation, true);
         return result;
@@ -3333,54 +3473,27 @@ void BoxDomain::joinDomain(const AbstractDomain& other)
         return;
     if (bottom_)
     {
-        *this = box;
+        bottom_ = false;
+        const auto copy = [this](const BoundSlot& slot)
+        {
+            storeFor(slot.variable).assign(slot);
+            return true;
+        };
+        if (config_.storage.values == box.config_.storage.values)
+            values_ = box.values_;
+        else
+            box.values_.forEach(copy);
+        if (config_.storage.objectContents == box.config_.storage.objectContents)
+            objectContents_ = box.objectContents_;
+        else
+            box.objectContents_.forEach(copy);
         return;
     }
 
-    BoundPageDirectory joinedPages;
-    joinedPages.reserve(std::min(boundPages_.size(),
-                                 box.boundPages_.size()));
-    auto otherPage = box.boundPages_.begin();
-    for (const BoundPageEntry& entry : boundPages_)
-    {
-        while (otherPage != box.boundPages_.end() &&
-                otherPage->index < entry.index)
-            ++otherPage;
-        if (otherPage == box.boundPages_.end() ||
-                otherPage->index != entry.index)
-        {
-            // Missing slots denote Top, so this entire page joins to Top.
-            continue;
-        }
-        if (entry.page == otherPage->page)
-        {
-            // COW identity proves every slot is equal without inspecting it.
-            joinedPages.push_back(entry);
-            continue;
-        }
-
-        auto joined = std::make_shared<BoundPage>(*entry.page);
-        for (std::size_t slot = 0; slot < BoundsPerPage; ++slot)
-        {
-            std::optional<BoundSlot>& left = joined->bounds[slot];
-            const std::optional<BoundSlot>& right =
-                otherPage->page->bounds[slot];
-            if (!left)
-                continue;
-            if (!right || left->variable != right->variable)
-            {
-                left.reset();
-                continue;
-            }
-            left->interval =
-                joinIntervals(left->interval, right->interval);
-            if (left->interval.isTop())
-                left.reset();
-        }
-        if (!pageIsEmpty(*joined))
-            joinedPages.push_back({entry.index, std::move(joined)});
-    }
-    boundPages_ = std::move(joinedPages);
+    if (this == &box)
+        return;
+    values_.join(box.values_);
+    objectContents_.join(box.objectContents_);
 }
 
 void BoxDomain::meetDomain(const AbstractDomain& other)
@@ -3417,39 +3530,23 @@ bool BoxDomain::isBottomDomain() const
 
 bool BoxDomain::isTopDomain() const
 {
-    return !bottom_ && boundPages_.empty();
+    return !bottom_ && values_.empty() && objectContents_.empty();
 }
 
 bool BoxDomain::leqDomain(const AbstractDomain& other) const
 {
     const BoxDomain& box = requireBox(other);
-    if (bottom_ == box.bottom_ && boundPages_.size() == box.boundPages_.size())
-    {
-        bool equal = true;
-        for (std::size_t index = 0; index < boundPages_.size(); ++index)
-        {
-            if (boundPages_[index].index != box.boundPages_[index].index ||
-                    (boundPages_[index].page != box.boundPages_[index].page &&
-                     boundPages_[index].page->bounds !=
-                     box.boundPages_[index].page->bounds))
-            {
-                equal = false;
-                break;
-            }
-        }
-        if (equal)
-            return true;
-    }
     if (bottom_)
         return true;
     if (box.bottom_)
         return false;
-    for (Variable variable : box.boundedVariables())
+    const auto included = [this](const BoundSlot& slot)
     {
-        if (!intervalIncluded(boundAt(variable), box.boundAt(variable)))
-            return false;
-    }
-    return true;
+        return intervalIncluded(boundAt(slot.variable), slot.interval);
+    };
+    return (values_.equalPages(box.values_) || box.values_.forEach(included)) &&
+           (objectContents_.equalPages(box.objectContents_) ||
+            box.objectContents_.forEach(included));
 }
 
 std::string BoxDomain::domainToString() const
@@ -3495,9 +3592,7 @@ void BoxDomain::canonicalize(Variable variable)
     if (interval.isTop())
         eraseBound(variable);
     else
-        writablePage(variable.id() / BoundsPerPage)
-        .bounds[variable.id() % BoundsPerPage] =
-            BoundSlot{variable, std::move(interval)};
+        storeBound(variable, std::move(interval));
 }
 
 void BoxDomain::setBound(Variable variable, Interval interval)
@@ -3517,24 +3612,281 @@ void BoxDomain::setBound(Variable variable, Interval interval)
     else if (interval.isTop())
         eraseBound(variable);
     else
-        writablePage(variable.id() / BoundsPerPage)
-        .bounds[variable.id() % BoundsPerPage] =
-            BoundSlot{variable, std::move(interval)};
+        storeBound(variable, std::move(interval));
+}
+
+BoxDomain::BoundStore::BoundStore(BoxStorage storage)
+    : width_(static_cast<std::uint32_t>(storage))
+{
+    if (width_)
+        storage_.emplace<Directory>();
+}
+
+BoxDomain::BoundStore::Page BoxDomain::BoundStore::newPage() const
+{
+    switch (width_)
+    {
+    case 1: return allocatePage<1>();
+    case 2: return allocatePage<2>();
+    case 4: return allocatePage<4>();
+    case 8: return allocatePage<8>();
+    case 16: return allocatePage<16>();
+    default: std::abort();
+    }
+}
+
+void BoxDomain::BoundStore::detach(Page& page) const
+{
+    if (page.use_count() == 1)
+        return;
+    auto copy = newPage();
+    std::copy_n(page.get(), width_, copy.get());
+    page = std::move(copy);
+}
+
+bool BoxDomain::BoundStore::emptyPage(const Page& page) const
+{
+    return std::none_of(page.get(), page.get() + width_, [](const Slot& slot)
+    {
+        return slot.has_value();
+    });
+}
+
+const BoxDomain::BoundSlot* BoxDomain::BoundStore::find(std::uint32_t id) const
+{
+    if (const auto* hash = std::get_if<Hash>(&storage_))
+    {
+        const auto found = hash->find(id);
+        return found != hash->end() ? &found->second : nullptr;
+    }
+    const auto& pages = std::get<Directory>(storage_);
+    const auto index = id / width_;
+    const auto page = findPage(pages, index);
+    if (page == pages.end() || page->index != index)
+        return nullptr;
+    const Slot& slot = page->page.get()[id % width_];
+    return slot ? &*slot : nullptr;
+}
+
+void BoxDomain::BoundStore::assign(BoundSlot slot)
+{
+    const auto id = slot.variable.id();
+    if (auto* hash = std::get_if<Hash>(&storage_))
+    {
+        hash->insert_or_assign(id, std::move(slot));
+        return;
+    }
+    auto& pages = std::get<Directory>(storage_);
+    const auto index = id / width_;
+    auto page = findPage(pages, index);
+    if (page == pages.end() || page->index != index)
+        page = pages.insert(page, {index, newPage()});
+    else
+        detach(page->page);
+    page->page.get()[id % width_] = std::move(slot);
+}
+
+void BoxDomain::BoundStore::erase(Variable variable)
+{
+    const auto id = variable.id();
+    const auto checkType = [variable](const BoundSlot& slot)
+    {
+        if (slot.variable != variable)
+        {
+            assert(false && "Variable ID was reused with a different numeric type");
+            std::abort();
+        }
+    };
+    if (auto* hash = std::get_if<Hash>(&storage_))
+    {
+        const auto found = hash->find(id);
+        if (found != hash->end())
+        {
+            checkType(found->second);
+            hash->erase(found);
+        }
+        return;
+    }
+    auto& pages = std::get<Directory>(storage_);
+    const auto index = id / width_;
+    auto page = findPage(pages, index);
+    if (page == pages.end() || page->index != index)
+        return;
+    const auto offset = id % width_;
+    if (const auto& slot = page->page.get()[offset])
+    {
+        checkType(*slot);
+        detach(page->page);
+        page->page.get()[offset].reset();
+        if (emptyPage(page->page))
+            pages.erase(page);
+    }
+}
+
+void BoxDomain::BoundStore::join(const BoundStore& other)
+{
+    if (width_ != other.width_)
+    {
+        BoundStore joined(static_cast<BoxStorage>(width_));
+        forEach([&](const BoundSlot& slot)
+        {
+            const auto* match = other.find(slot.variable.id());
+            if (match && slot.variable == match->variable)
+            {
+                auto interval = joinIntervals(slot.interval, match->interval);
+                if (!interval.isTop())
+                    joined.assign({slot.variable, std::move(interval)});
+            }
+            return true;
+        });
+        *this = std::move(joined);
+        return;
+    }
+    if (auto* hash = std::get_if<Hash>(&storage_))
+    {
+        const auto& rhs = std::get<Hash>(other.storage_);
+        for (auto it = hash->begin(); it != hash->end();)
+        {
+            const auto match = rhs.find(it->first);
+            if (match == rhs.end() || it->second.variable != match->second.variable)
+            {
+                it = hash->erase(it);
+                continue;
+            }
+            it->second.interval = joinIntervals(it->second.interval, match->second.interval);
+            if (it->second.interval.isTop())
+                it = hash->erase(it);
+            else
+                ++it;
+        }
+        return;
+    }
+    auto& left = std::get<Directory>(storage_);
+    const auto& right = std::get<Directory>(other.storage_);
+    Directory joined;
+    joined.reserve(std::min(left.size(), right.size()));
+    auto match = right.begin();
+    for (const auto& entry : left)
+    {
+        while (match != right.end() && match->index < entry.index)
+            ++match;
+        if (match == right.end() || match->index != entry.index)
+            continue;
+        if (entry.page == match->page)
+        {
+            joined.push_back(entry);
+            continue;
+        }
+
+        auto page = entry.page;
+        detach(page);
+        for (std::size_t i = 0; i < width_; ++i)
+        {
+            auto& l = page.get()[i];
+            const auto& r = match->page.get()[i];
+            if (!l)
+                continue;
+            if (r && l->variable == r->variable)
+                l->interval = joinIntervals(l->interval, r->interval);
+            else
+                l.reset();
+            if (l && l->interval.isTop())
+                l.reset();
+        }
+        if (!emptyPage(page))
+            joined.push_back({entry.index, std::move(page)});
+    }
+    left = std::move(joined);
+}
+
+bool BoxDomain::BoundStore::equalPages(const BoundStore& other) const
+{
+    const auto* l = std::get_if<Directory>(&storage_);
+    const auto* r = std::get_if<Directory>(&other.storage_);
+    if (!l || !r || width_ != other.width_ || l->size() != r->size())
+        return false;
+    for (std::size_t i = 0; i < l->size(); ++i)
+    {
+        const auto& a = (*l)[i];
+        const auto& b = (*r)[i];
+        if (a.index != b.index ||
+                (a.page != b.page &&
+                 !std::equal(a.page.get(), a.page.get() + width_, b.page.get())))
+            return false;
+    }
+    return true;
+}
+
+void BoxDomain::BoundStore::clear()
+{
+    std::visit([](auto& store) { store.clear(); }, storage_);
+}
+
+bool BoxDomain::BoundStore::empty() const
+{
+    return std::visit([](const auto& store) { return store.empty(); }, storage_);
+}
+
+BoxDomain::BoundStore BoxDomain::BoundStore::without(
+    const std::set<Variable>& omitted) const
+{
+    BoundStore result(static_cast<BoxStorage>(width_));
+    if (const auto* source = std::get_if<Hash>(&storage_))
+    {
+        auto& selected = std::get<Hash>(result.storage_);
+        for (const auto& [id, slot] : *source)
+            if (!omitted.count(slot.variable))
+                selected.emplace(id, slot);
+        return result;
+    }
+    auto& selected = std::get<Directory>(result.storage_);
+    const auto& source = std::get<Directory>(storage_);
+    selected.reserve(source.size());
+    for (const auto& entry : source)
+    {
+        auto page = entry.page;
+        for (std::size_t i = 0; i < width_; ++i)
+        {
+            const auto& slot = entry.page.get()[i];
+            if (slot && omitted.count(slot->variable))
+            {
+                detach(page);
+                page.get()[i].reset();
+            }
+        }
+        if (page == entry.page || !emptyPage(page))
+            selected.push_back({entry.index, std::move(page)});
+    }
+    return result;
+}
+
+BoxDomain::BoundStore& BoxDomain::storeFor(Variable variable)
+{
+    return variable.role() == Variable::Role::ObjectContent ? objectContents_ : values_;
+}
+
+const BoxDomain::BoundStore& BoxDomain::storeFor(Variable variable) const
+{
+    return variable.role() == Variable::Role::ObjectContent ? objectContents_ : values_;
+}
+
+BoxDomain BoxDomain::withoutBounds(const std::set<Variable>& omitted) const
+{
+    auto result = top(config_);
+    result.values_ = values_.without(omitted);
+    result.objectContents_ = objectContents_.without(omitted);
+    return result;
+}
+
+void BoxDomain::storeBound(Variable variable, Interval interval)
+{
+    storeFor(variable).assign({variable, std::move(interval)});
 }
 
 const Interval& BoxDomain::boundAt(Variable variable) const
 {
     static const Interval top = Interval::top();
-    const std::size_t pageIndex = variable.id() / BoundsPerPage;
-    const auto iterator =
-        std::lower_bound(boundPages_.begin(), boundPages_.end(), pageIndex,
-                         [](const BoundPageEntry& entry, std::size_t index)
-    {
-        return entry.index < index;
-    });
-    if (iterator == boundPages_.end() || iterator->index != pageIndex)
-        return top;
-    const auto& slot = iterator->page->bounds[variable.id() % BoundsPerPage];
+    const auto* slot = storeFor(variable).find(variable.id());
     if (!slot)
         return top;
     if (slot->variable != variable)
@@ -3545,100 +3897,39 @@ const Interval& BoxDomain::boundAt(Variable variable) const
     return slot->interval;
 }
 
-BoxDomain::BoundPage& BoxDomain::writablePage(std::size_t pageIndex)
-{
-    auto iterator =
-        std::lower_bound(boundPages_.begin(), boundPages_.end(), pageIndex,
-                         [](const BoundPageEntry& entry, std::size_t index)
-    {
-        return entry.index < index;
-    });
-    if (iterator == boundPages_.end() || iterator->index != pageIndex)
-        iterator = boundPages_.insert(
-                       iterator, {pageIndex, std::make_shared<BoundPage>()});
-    else if (iterator->page.use_count() != 1)
-        iterator->page = std::make_shared<BoundPage>(*iterator->page);
-    return *iterator->page;
-}
-
 void BoxDomain::eraseBound(Variable variable)
 {
-    const std::size_t pageIndex = variable.id() / BoundsPerPage;
-    auto existing =
-        std::lower_bound(boundPages_.begin(), boundPages_.end(), pageIndex,
-                         [](const BoundPageEntry& entry, std::size_t index)
-    {
-        return entry.index < index;
-    });
-    if (existing == boundPages_.end() || existing->index != pageIndex)
-        return;
-    const std::size_t offset = variable.id() % BoundsPerPage;
-    if (!existing->page->bounds[offset])
-        return;
-    if (existing->page->bounds[offset]->variable != variable)
-    {
-        assert(false && "Variable ID was reused with a different numeric type");
-        std::abort();
-    }
-    auto iterator =
-        std::lower_bound(boundPages_.begin(), boundPages_.end(), pageIndex,
-                         [](const BoundPageEntry& entry, std::size_t index)
-    {
-        return entry.index < index;
-    });
-    if (iterator->page.use_count() != 1)
-        iterator->page = std::make_shared<BoundPage>(*iterator->page);
-    iterator->page->bounds[offset].reset();
-    if (pageIsEmpty(*iterator->page))
-        boundPages_.erase(iterator);
-}
-
-bool BoxDomain::pageIsEmpty(const BoundPage& page)
-{
-    return std::none_of(page.bounds.begin(), page.bounds.end(),
-                        [](const auto& bound)
-    {
-        return bound.has_value();
-    });
+    storeFor(variable).erase(variable);
 }
 
 std::vector<Variable> BoxDomain::boundedVariables() const
 {
     std::vector<Variable> variables;
-    for (const BoundPageEntry& entry : boundPages_)
+    const auto add = [&variables](const BoundSlot& slot)
     {
-        for (std::size_t offset = 0; offset < BoundsPerPage; ++offset)
-        {
-            if (entry.page->bounds[offset])
-            {
-                variables.push_back(entry.page->bounds[offset]->variable);
-            }
-        }
-    }
+        variables.push_back(slot.variable);
+        return true;
+    };
+    values_.forEach(add);
+    objectContents_.forEach(add);
+    std::sort(variables.begin(), variables.end());
     return variables;
 }
 
 std::vector<Variable> BoxDomain::boundedVariablesBefore(
-    std::uint32_t upperBound) const
+    Variable upperBound) const
 {
-    std::vector<Variable> variables;
-    for (const BoundPageEntry& entry : boundPages_)
-    {
-        if (entry.index * BoundsPerPage >= upperBound)
-            break;
-        for (const std::optional<BoundSlot>& slot : entry.page->bounds)
-        {
-            if (slot && slot->variable.id() < upperBound)
-                variables.push_back(slot->variable);
-        }
-    }
+    auto variables = boundedVariables();
+    const auto end = std::lower_bound(variables.begin(), variables.end(), upperBound);
+    variables.erase(end, variables.end());
     return variables;
 }
 
 void BoxDomain::makeBottom()
 {
     bottom_ = true;
-    boundPages_.clear();
+    values_.clear();
+    objectContents_.clear();
 }
 
 void BoxDomain::report(OperationKind operation, ApproximationKind approximation,

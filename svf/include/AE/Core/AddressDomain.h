@@ -28,10 +28,15 @@
 
 #include <array>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace SVF
@@ -40,7 +45,8 @@ namespace SVF
 class Location
 {
 public:
-    explicit Location(std::uint32_t id = 0) : id_(id) {}
+    Location() = default;
+    explicit Location(std::uint32_t id) : id_(id) {}
 
     static Location null()
     {
@@ -53,7 +59,7 @@ public:
     }
     bool isNull() const
     {
-        return id_ == 0;
+        return id_ == NullId;
     }
 
     friend bool operator==(Location lhs, Location rhs)
@@ -70,38 +76,95 @@ public:
     }
 
 private:
-    std::uint32_t id_;
+    // Raw ID zero belongs to the PAG BlackHole object and is a regular ID.
+    static constexpr auto NullId = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t id_ = NullId;
 };
 
-/// Sorted finite location storage with two inline elements. Most AE
-/// points-to facts are singletons, so they require no auxiliary allocation.
+/// Representation of the finite set in each address value.
+enum class AddressSetStorage
+{
+    Hash,
+    OneWithSharedOverflow,
+    FourWithPrivateOverflow
+};
+
 class FiniteLocationSet
 {
+    struct LocationHash
+    {
+        std::size_t operator()(Location location) const noexcept
+        {
+            return std::hash<std::uint32_t>{}(location.id());
+        }
+    };
+    using Hash = std::unordered_set<Location, LocationHash>;
+    using Buffer = std::vector<Location>;
+    using Small = std::array<Location, 4>;
+    using Shared = std::shared_ptr<Buffer>;
+    using Private = std::unique_ptr<Buffer>;
+
 public:
-    using const_iterator = const Location*;
+    class const_iterator
+    {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Location;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Location*;
+        using reference = const Location&;
 
-    FiniteLocationSet() = default;
+        const_iterator() = default;
+        explicit const_iterator(pointer it) : position_(it) {}
+        explicit const_iterator(Hash::const_iterator it) : position_(it) {}
+
+        reference operator*() const;
+        pointer operator->() const { return &**this; }
+        const_iterator& operator++();
+        const_iterator operator++(int);
+        friend bool operator==(const const_iterator& lhs, const const_iterator& rhs)
+        {
+            return lhs.position_ == rhs.position_;
+        }
+        friend bool operator!=(const const_iterator& lhs, const const_iterator& rhs)
+        {
+            return !(lhs == rhs);
+        }
+
+    private:
+        std::variant<pointer, Hash::const_iterator> position_{nullptr};
+    };
+
+    explicit FiniteLocationSet(AddressSetStorage storage =
+                                   AddressSetStorage::OneWithSharedOverflow)
+        : storage_(storage)
+    {
+    }
     FiniteLocationSet(const FiniteLocationSet& other);
-    FiniteLocationSet(FiniteLocationSet&& other) noexcept = default;
+    FiniteLocationSet(FiniteLocationSet&& other) noexcept;
     FiniteLocationSet& operator=(const FiniteLocationSet& other);
-    FiniteLocationSet& operator=(FiniteLocationSet&& other) noexcept = default;
+    FiniteLocationSet& operator=(FiniteLocationSet&& other) noexcept;
 
+    AddressSetStorage storage() const { return storage_; }
     std::size_t size() const;
-    bool empty() const;
+    bool empty() const { return size() == 0; }
     bool contains(Location location) const;
     const_iterator begin() const;
     const_iterator end() const;
     void insert(Location location);
     void assign(std::vector<Location> locations);
+    void clear();
 
     friend bool operator==(const FiniteLocationSet& lhs,
                            const FiniteLocationSet& rhs);
 
 private:
-    static constexpr std::size_t InlineCapacity = 2;
-    std::size_t size_ = 0;
-    std::array<Location, InlineCapacity> inline_{Location(), Location()};
-    std::unique_ptr<std::vector<Location>> overflow_;
+    const Location* sortedData() const;
+    std::size_t inlineCapacity() const;
+
+    AddressSetStorage storage_;
+    std::uint8_t inlineSize_ = 0;
+    std::variant<Small, Shared, Private, std::unique_ptr<Hash>> contents_{Small{}};
 };
 
 /// Address value split into modeled-object, null, and raw-address components.
@@ -167,6 +230,9 @@ public:
     }
 
 private:
+    friend class AddressDomain;
+    void useStorage(AddressSetStorage storage);
+
     AddressSet(bool allObjects, bool mayContainRawAddress)
         : allObjects_(allObjects),
           mayContainRawAddress_(mayContainRawAddress)
@@ -185,11 +251,14 @@ private:
 /// address carrier.
 class AddressDomain final : public AbstractDomain
 {
-    friend class BoxAddressDomain;
-
 public:
-    static AddressDomain top();
-    static AddressDomain bottom();
+    static AddressDomain top(AddressSetStorage storage =
+                                 AddressSetStorage::OneWithSharedOverflow);
+    static AddressDomain bottom(AddressSetStorage storage =
+                                    AddressSetStorage::OneWithSharedOverflow);
+
+    AddressSetStorage setStorage() const { return storage_; }
+    AddressDomain without(const std::set<Variable>& omitted) const;
 
     DomainKind kind() const noexcept override
     {
@@ -231,8 +300,8 @@ private:
 
     using ValuePageDirectory = std::vector<ValuePageEntry>;
 
-    explicit AddressDomain(bool bottom)
-        : bottom_(bottom), smallValues_(emptySmallValues())
+    AddressDomain(bool bottom, AddressSetStorage storage)
+        : storage_(storage), bottom_(bottom), smallValues_(emptySmallValues())
     {
     }
 
@@ -261,6 +330,7 @@ private:
     static bool pageIsEmpty(const ValuePage& page);
     void makeBottom();
 
+    AddressSetStorage storage_;
     bool bottom_ = false;
     bool paged_ = false;
     std::size_t size_ = 0;

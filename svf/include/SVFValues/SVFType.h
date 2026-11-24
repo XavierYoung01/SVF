@@ -336,7 +336,7 @@ class SVFIntegerType : public SVFType
     friend class GraphDBClient;
 
 private:
-    short signAndWidth; ///< For printing
+    short signAndWidth = 0; ///< For printing
 
 protected:
 
@@ -362,6 +362,11 @@ public:
     bool isSigned() const
     {
         return signAndWidth < 0;
+    }
+
+    unsigned getBitWidth() const
+    {
+        return isSigned() ? -signAndWidth : signAndWidth;
     }
 };
 

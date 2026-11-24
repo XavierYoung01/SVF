@@ -32,95 +32,199 @@
 
 namespace SVF
 {
-FiniteLocationSet::FiniteLocationSet(const FiniteLocationSet& other)
-    : size_(other.size_), inline_(other.inline_)
+FiniteLocationSet::const_iterator::reference
+FiniteLocationSet::const_iterator::operator*() const
 {
-    if (other.overflow_)
-        overflow_ =
-            std::make_unique<std::vector<Location>>(*other.overflow_);
+    if (const auto* sorted = std::get_if<pointer>(&position_))
+        return **sorted;
+    return *std::get<Hash::const_iterator>(position_);
 }
 
-FiniteLocationSet& FiniteLocationSet::operator=(
-    const FiniteLocationSet& other)
+FiniteLocationSet::const_iterator& FiniteLocationSet::const_iterator::operator++()
 {
-    if (this == &other)
-        return *this;
-    size_ = other.size_;
-    inline_ = other.inline_;
-    overflow_ = other.overflow_
-                ? std::make_unique<std::vector<Location>>(*other.overflow_)
-                : nullptr;
+    if (auto* sorted = std::get_if<pointer>(&position_))
+        ++*sorted;
+    else
+        ++std::get<Hash::const_iterator>(position_);
+    return *this;
+}
+
+FiniteLocationSet::const_iterator FiniteLocationSet::const_iterator::operator++(int)
+{
+    auto previous = *this;
+    ++*this;
+    return previous;
+}
+
+FiniteLocationSet::FiniteLocationSet(const FiniteLocationSet& other)
+    : storage_(other.storage_), inlineSize_(other.inlineSize_)
+{
+    if (const auto* locations = std::get_if<Small>(&other.contents_))
+        contents_ = *locations;
+    else if (const auto* shared = std::get_if<Shared>(&other.contents_))
+        contents_ = *shared;
+    else if (const auto* owned = std::get_if<Private>(&other.contents_))
+        contents_ = std::make_unique<Buffer>(**owned);
+    else
+        contents_ = std::make_unique<Hash>(*std::get<std::unique_ptr<Hash>>(other.contents_));
+}
+
+FiniteLocationSet::FiniteLocationSet(FiniteLocationSet&& other) noexcept
+    : storage_(other.storage_), inlineSize_(other.inlineSize_),
+      contents_(std::move(other.contents_))
+{
+    other.clear();
+}
+
+FiniteLocationSet& FiniteLocationSet::operator=(FiniteLocationSet&& other) noexcept
+{
+    if (this != &other)
+    {
+        storage_ = other.storage_;
+        inlineSize_ = other.inlineSize_;
+        contents_ = std::move(other.contents_);
+        other.clear();
+    }
+    return *this;
+}
+
+FiniteLocationSet& FiniteLocationSet::operator=(const FiniteLocationSet& other)
+{
+    if (this != &other)
+        *this = FiniteLocationSet(other);
     return *this;
 }
 
 std::size_t FiniteLocationSet::size() const
 {
-    return size_;
+    if (const auto* shared = std::get_if<Shared>(&contents_))
+        return (*shared)->size();
+    if (const auto* owned = std::get_if<Private>(&contents_))
+        return (*owned)->size();
+    if (const auto* hash = std::get_if<std::unique_ptr<Hash>>(&contents_))
+        return (*hash)->size();
+    return inlineSize_;
 }
 
-bool FiniteLocationSet::empty() const
+std::size_t FiniteLocationSet::inlineCapacity() const
 {
-    return size_ == 0;
+    return storage_ == AddressSetStorage::FourWithPrivateOverflow ? 4 : 1;
+}
+
+const Location* FiniteLocationSet::sortedData() const
+{
+    if (const auto* shared = std::get_if<Shared>(&contents_))
+        return (*shared)->data();
+    if (const auto* owned = std::get_if<Private>(&contents_))
+        return (*owned)->data();
+    return std::get<Small>(contents_).data();
 }
 
 bool FiniteLocationSet::contains(Location location) const
 {
-    if (size_ <= InlineCapacity)
-        return std::find(begin(), end(), location) != end();
-    return std::binary_search(begin(), end(), location);
+    if (const auto* hash = std::get_if<std::unique_ptr<Hash>>(&contents_))
+        return (*hash)->count(location) != 0;
+    const auto* first = sortedData();
+    const auto* last = first + size();
+    return std::holds_alternative<Small>(contents_)
+           ? std::find(first, last, location) != last
+           : std::binary_search(first, last, location);
 }
 
 FiniteLocationSet::const_iterator FiniteLocationSet::begin() const
 {
-    return overflow_ ? overflow_->data() : inline_.data();
+    if (const auto* hash = std::get_if<std::unique_ptr<Hash>>(&contents_))
+        return const_iterator((*hash)->cbegin());
+    return const_iterator(sortedData());
 }
 
 FiniteLocationSet::const_iterator FiniteLocationSet::end() const
 {
-    return begin() + size_;
+    if (const auto* hash = std::get_if<std::unique_ptr<Hash>>(&contents_))
+        return const_iterator((*hash)->cend());
+    return const_iterator(sortedData() + size());
 }
 
 void FiniteLocationSet::insert(Location location)
 {
-    const auto position = std::lower_bound(begin(), end(), location);
-    if (position != end() && *position == location)
-        return;
-    const std::size_t index = static_cast<std::size_t>(position - begin());
-    if (!overflow_ && size_ < InlineCapacity)
+    if (storage_ == AddressSetStorage::Hash)
     {
-        std::move_backward(inline_.begin() + index, inline_.begin() + size_,
-                           inline_.begin() + size_ + 1);
-        inline_[index] = location;
-        ++size_;
+        if (!std::holds_alternative<std::unique_ptr<Hash>>(contents_))
+            contents_ = std::make_unique<Hash>();
+        std::get<std::unique_ptr<Hash>>(contents_)->insert(location);
         return;
     }
-    if (!overflow_)
+
+    const auto* first = sortedData();
+    const auto* last = first + size();
+    const auto* position = std::lower_bound(first, last, location);
+    if (position != last && *position == location)
+        return;
+    const auto index = position - first;
+    if (auto* small = std::get_if<Small>(&contents_))
     {
-        overflow_ = std::make_unique<std::vector<Location>>(inline_.begin(),
-            inline_.end());
-        overflow_->reserve(InlineCapacity * 2);
+        if (inlineSize_ < inlineCapacity())
+        {
+            std::move_backward(small->begin() + index, small->begin() + inlineSize_,
+                               small->begin() + inlineSize_ + 1);
+            (*small)[index] = location;
+            ++inlineSize_;
+            return;
+        }
+        Buffer expanded(first, last);
+        expanded.insert(expanded.begin() + index, location);
+        assign(std::move(expanded));
     }
-    overflow_->insert(overflow_->begin() + index, location);
-    ++size_;
+    else if (auto* shared = std::get_if<Shared>(&contents_))
+    {
+        if (shared->use_count() != 1)
+            *shared = std::make_shared<Buffer>(**shared);
+        (*shared)->insert((*shared)->begin() + index, location);
+    }
+    else
+    {
+        auto& owned = std::get<Private>(contents_);
+        owned->insert(owned->begin() + index, location);
+    }
 }
 
+// Input is sorted and unique when it comes from a sorted set operation.
 void FiniteLocationSet::assign(std::vector<Location> locations)
 {
-    size_ = locations.size();
-    if (locations.size() <= InlineCapacity)
+    if (storage_ == AddressSetStorage::Hash && !locations.empty())
     {
-        overflow_.reset();
-        std::copy(locations.begin(), locations.end(), inline_.begin());
-        return;
+        contents_ = std::make_unique<Hash>(locations.begin(), locations.end());
+        inlineSize_ = 0;
     }
-    overflow_ =
-        std::make_unique<std::vector<Location>>(std::move(locations));
+    else if (locations.size() <= inlineCapacity())
+    {
+        Small small{};
+        std::copy(locations.begin(), locations.end(), small.begin());
+        contents_ = small;
+        inlineSize_ = static_cast<std::uint8_t>(locations.size());
+    }
+    else if (storage_ == AddressSetStorage::OneWithSharedOverflow)
+        contents_ = std::make_shared<Buffer>(std::move(locations));
+    else
+        contents_ = std::make_unique<Buffer>(std::move(locations));
+}
+
+void FiniteLocationSet::clear()
+{
+    contents_ = Small{};
+    inlineSize_ = 0;
 }
 
 bool operator==(const FiniteLocationSet& lhs, const FiniteLocationSet& rhs)
 {
-    return lhs.size_ == rhs.size_ &&
-           std::equal(lhs.begin(), lhs.end(), rhs.begin());
+    if (lhs.size() != rhs.size())
+        return false;
+    if (lhs.storage_ != AddressSetStorage::Hash && rhs.storage_ != AddressSetStorage::Hash)
+        return std::equal(lhs.sortedData(), lhs.sortedData() + lhs.size(), rhs.sortedData());
+    return std::all_of(lhs.begin(), lhs.end(), [&](Location location)
+    {
+        return rhs.contains(location);
+    });
 }
 
 AddressSet AddressSet::bottom()
@@ -285,12 +389,14 @@ void AddressSet::joinWith(const AddressSet& other)
     if (allObjects_ || other.allObjects_)
     {
         allObjects_ = true;
-        locations_ = FiniteLocationSet();
+        locations_.clear();
         if (includeNull)
             locations_.insert(Location::null());
         return;
     }
-    if (locations_.size() <= 2 && other.locations_.size() <= 2)
+    if (locations_.storage() == AddressSetStorage::Hash ||
+            other.locations_.storage() == AddressSetStorage::Hash ||
+            (locations_.size() <= 2 && other.locations_.size() <= 2))
     {
         for (Location location : other.locations_)
             locations_.insert(location);
@@ -311,7 +417,7 @@ void AddressSet::meetWith(const AddressSet& other)
     const bool includeNull = contains(Location::null()) &&
                              other.contains(Location::null());
     const bool objects = allObjects_ && other.allObjects_;
-    FiniteLocationSet intersection;
+    FiniteLocationSet intersection(locations_.storage());
     if (allObjects_ && !other.allObjects_)
     {
         for (Location location : other.locations_)
@@ -326,7 +432,9 @@ void AddressSet::meetWith(const AddressSet& other)
     }
     else if (!allObjects_ && !other.allObjects_)
     {
-        if (locations_.size() <= 2 && other.locations_.size() <= 2)
+        if (locations_.storage() == AddressSetStorage::Hash ||
+            other.locations_.storage() == AddressSetStorage::Hash ||
+            (locations_.size() <= 2 && other.locations_.size() <= 2))
         {
             for (Location location : locations_)
             {
@@ -397,25 +505,94 @@ std::string AddressSet::toString() const
     std::ostringstream output;
     output << (mayContainRawAddress_ ? "raw+{" : "{");
     bool first = true;
-    for (Location location : locations_)
+    std::vector<Location> sorted(locations_.begin(), locations_.end());
+    std::sort(sorted.begin(), sorted.end());
+    for (Location location : sorted)
     {
         if (!first)
             output << ",";
         first = false;
-        output << location.id();
+        if (location.isNull())
+            output << "null";
+        else
+            output << location.id();
     }
     output << "}";
     return output.str();
 }
 
-AddressDomain AddressDomain::top()
+void AddressSet::useStorage(AddressSetStorage storage)
 {
-    return AddressDomain(false);
+    if (locations_.storage() == storage)
+        return;
+    FiniteLocationSet converted(storage);
+    for (Location location : locations_)
+        converted.insert(location);
+    locations_ = std::move(converted);
 }
 
-AddressDomain AddressDomain::bottom()
+AddressDomain AddressDomain::top(AddressSetStorage storage)
 {
-    return AddressDomain(true);
+    return AddressDomain(false, storage);
+}
+
+AddressDomain AddressDomain::bottom(AddressSetStorage storage)
+{
+    return AddressDomain(true, storage);
+}
+
+AddressDomain AddressDomain::without(const std::set<Variable>& omitted) const
+{
+    if (bottom_ || omitted.empty())
+        return *this;
+    AddressDomain result = top(storage_);
+    if (!paged_)
+    {
+        result.smallValues_ = smallValues_;
+        result.size_ = size_;
+        const auto& values = *smallValues_;
+        const auto first = std::find_if(values.begin(), values.end(),
+                                        [&](const auto& value)
+        {
+            return omitted.count(value.first);
+        });
+        if (first != values.end())
+        {
+            result.smallValues_ = std::make_shared<SmallValues>(
+                                        values.begin(), first);
+            for (auto it = first; it != values.end(); ++it)
+                if (!omitted.count(it->first))
+                    result.smallValues_->push_back(*it);
+            result.size_ = result.smallValues_->size();
+        }
+    }
+    else
+    {
+        result.paged_ = true;
+        result.size_ = size_;
+        result.pages_.reserve(pages_.size());
+        for (const auto& entry : pages_)
+        {
+            std::shared_ptr<ValuePage> selected;
+            for (std::size_t i = 0; i < ValuesPerPage; ++i)
+            {
+                const auto& slot = entry.page->values[i];
+                if (slot && omitted.count(slot->variable))
+                {
+                    if (!selected)
+                        selected = std::make_shared<ValuePage>(*entry.page);
+                    selected->values[i].reset();
+                    --result.size_;
+                }
+            }
+            if (!selected)
+                result.pages_.push_back(entry);
+            else if (!pageIsEmpty(*selected))
+                result.pages_.push_back({entry.index, std::move(selected)});
+        }
+    }
+
+    return result;
 }
 
 std::unique_ptr<AbstractDomain> AddressDomain::clone() const
@@ -513,10 +690,17 @@ void AddressDomain::joinDomain(const AbstractDomain& other)
         return;
     if (bottom_)
     {
-        *this = address;
+        if (storage_ == address.storage_)
+            *this = address;
+        else
+        {
+            bottom_ = false;
+            for (Variable variable : address.nonDefaultVariables())
+                assign(variable, address.addressSet(variable));
+        }
         return;
     }
-    AddressDomain result = top();
+    AddressDomain result = top(storage_);
     for (Variable variable : nonDefaultVariables())
     {
         AddressSet joined = addressSet(variable);
@@ -535,7 +719,7 @@ void AddressDomain::meetDomain(const AbstractDomain& other)
         makeBottom();
         return;
     }
-    AddressDomain result = top();
+    AddressDomain result = top(storage_);
     std::vector<Variable> variables = nonDefaultVariables();
     const std::vector<Variable> otherVariables = address.nonDefaultVariables();
     variables.insert(variables.end(), otherVariables.begin(),
@@ -698,6 +882,7 @@ const AddressSet* AddressDomain::findValue(Variable variable) const
 
 void AddressDomain::storeValue(Variable variable, AddressSet addresses)
 {
+    addresses.useStorage(storage_);
     if (!paged_)
     {
         SmallValues& values = writableSmallValues();

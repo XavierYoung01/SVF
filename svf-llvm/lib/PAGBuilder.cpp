@@ -418,7 +418,7 @@ void PAGBuilder::initialiseBaseObjVars()
         else if (auto intValue = SVFUtil::dyn_cast<ConstantInt>(llvmValue))
         {
             NodeID id = llvmModuleSet()->getObjectNode(iter->first);
-            pag->addConstantIntObjNode(iter->second, pag->getObjTypeInfo(id), LLVMUtil::getIntegerValue(intValue), icfgNode);
+            pag->addConstantIntObjNode(iter->second, pag->getObjTypeInfo(id), LLVMUtil::getIntegerValue(intValue), icfgNode, LLVMUtil::getIntegerLiteral(intValue));
         }
         else if (SVFUtil::isa<ConstantPointerNull>(llvmValue))
         {
@@ -486,7 +486,7 @@ void PAGBuilder::initialiseValVars()
         }
         else if (auto intValue = SVFUtil::dyn_cast<ConstantInt>(llvmValue))
         {
-            pag->addConstantIntValNode(iter->second, LLVMUtil::getIntegerValue(intValue), icfgNode, llvmModuleSet()->getSVFType(llvmValue->getType()));
+            pag->addConstantIntValNode(iter->second, LLVMUtil::getIntegerValue(intValue), icfgNode, llvmModuleSet()->getSVFType(llvmValue->getType()), LLVMUtil::getIntegerLiteral(intValue));
         }
         else if (SVFUtil::isa<ConstantPointerNull>(llvmValue))
         {
@@ -633,13 +633,10 @@ bool PAGBuilder::computeGepOffset(const User *V, AccessPath& ap)
 {
     assert(V);
 
-    const llvm::GEPOperator *gepOp = SVFUtil::dyn_cast<const llvm::GEPOperator>(V);
-    DataLayout * dataLayout = getDataLayout(llvmModuleSet()->getMainLLVMModule());
-    llvm::APInt byteOffset(dataLayout->getIndexSizeInBits(gepOp->getPointerAddressSpace()),0,true);
-    if(gepOp && dataLayout && gepOp->accumulateConstantOffset(*dataLayout,byteOffset))
-    {
-        //s32_t bo = byteOffset.getSExtValue();
-    }
+    const auto* gepOp = SVFUtil::cast<llvm::GEPOperator>(V);
+    const auto* dataLayout = getDataLayout(llvmModuleSet()->getMainLLVMModule());
+    const auto indexWidth = dataLayout->getIndexSizeInBits(gepOp->getPointerAddressSpace());
+    ap.setIndexBitWidth(indexWidth);
 
     bool isConst = true;
 
@@ -675,7 +672,18 @@ bool PAGBuilder::computeGepOffset(const User *V, AccessPath& ap)
         ap.addOffsetVarAndGepTypePair(getPAG()->getValVar(llvmModuleSet()->getValueNode(offsetVal)), idxGepTy);
 
         //The int value of the current index operand
-        const ConstantInt* op = SVFUtil::dyn_cast<ConstantInt>(offsetVal);
+        const auto* op = SVFUtil::dyn_cast<ConstantInt>(offsetVal);
+        std::optional<std::int64_t> constantIndex;
+        if (op)
+        {
+            const auto bits = op->getValue().sextOrTrunc(indexWidth);
+            if (!bits.isSignedIntN(64))
+            {
+                isConst = false;
+                continue;
+            }
+            constantIndex = bits.getSExtValue();
+        }
 
         // if Options::ModelConsts() is disabled. We will treat whole array as one,
         // but we can distinguish different field of an array of struct, e.g. s[1].f1 is different from s[0].f2
@@ -683,9 +691,11 @@ bool PAGBuilder::computeGepOffset(const User *V, AccessPath& ap)
         {
             if (!Options::ModelArrays() && arrTy->getElementType()->isPointerTy())
                 continue;
-            if(!op || (arrTy->getArrayNumElements() <= (u32_t)LLVMUtil::getIntegerValue(op).first))
+            if (!constantIndex || *constantIndex < 0 ||
+                    static_cast<std::uint64_t>(*constantIndex) >= arrTy->getArrayNumElements() ||
+                    *constantIndex > std::numeric_limits<u32_t>::max())
                 continue;
-            APOffset idx = (u32_t)LLVMUtil::getIntegerValue(op).first;
+            APOffset idx = *constantIndex;
             u32_t offset = pag->getFlattenedElemIdx(llvmModuleSet()->getSVFType(arrTy), idx);
             ap.setFldIdx(ap.getConstantStructFldIdx() + offset);
         }
@@ -696,7 +706,7 @@ bool PAGBuilder::computeGepOffset(const User *V, AccessPath& ap)
             // (e.g. rust hashbrown bucket back-offset: gep { ... }, ptr %p, i64 -1)
             // a negative i64 wraps to a huge uint64_t that overflows u32_t,
             // creating an invalid field index that severs points-to tracking
-            uint64_t rawIdx = LLVMUtil::getIntegerValue(op).first;
+            const auto rawIdx = static_cast<std::uint64_t>(*constantIndex);
             if (rawIdx >= ST->getNumElements())
             {
                 isConst = false;
@@ -710,9 +720,11 @@ bool PAGBuilder::computeGepOffset(const User *V, AccessPath& ap)
         {
             if (inferredPtrArrayTy)
             {
-                if (!op || (inferredPtrArrayTy->getArrayNumElements() <= (u32_t)LLVMUtil::getIntegerValue(op).first))
+                if (!constantIndex || *constantIndex < 0 ||
+                        static_cast<std::uint64_t>(*constantIndex) >= inferredPtrArrayTy->getArrayNumElements() ||
+                        *constantIndex > std::numeric_limits<u32_t>::max())
                     continue;
-                APOffset idx = (u32_t)LLVMUtil::getIntegerValue(op).first;
+                APOffset idx = *constantIndex;
                 u32_t offset = pag->getFlattenedElemIdx(llvmModuleSet()->getSVFType(inferredPtrArrayTy), idx);
                 ap.setFldIdx(ap.getConstantStructFldIdx() + offset);
                 continue;
@@ -1183,7 +1195,8 @@ void PAGBuilder::visitBinaryOperator(BinaryOperator &inst)
     Value* op2 = inst.getOperand(1);
     NodeID op2Node = getValueNode(op2);
     u32_t opcode = inst.getOpcode();
-    addBinaryOPEdge(op1Node, op2Node, dst, opcode);
+    addBinaryOPEdge(op1Node, op2Node, dst, opcode,
+                    inst.hasNoSignedWrap(), inst.hasNoUnsignedWrap());
 }
 
 /*!
@@ -2123,13 +2136,13 @@ const Value* PAGBuilder::getBaseValueForExtArg(const Value* V)
 
     if(const GetElementPtrInst* gep = SVFUtil::dyn_cast<GetElementPtrInst>(value))
     {
-        APOffset totalidx = 0;
-        for (bridge_gep_iterator gi = bridge_gep_begin(gep), ge = bridge_gep_end(gep); gi != ge; ++gi)
+        const bool zeroIndices = std::all_of(gep->idx_begin(), gep->idx_end(),
+                                             [](const llvm::Use& index)
         {
-            if(const ConstantInt* op = SVFUtil::dyn_cast<ConstantInt>(gi.getOperand()))
-                totalidx += LLVMUtil::getIntegerValue(op).first;
-        }
-        if(totalidx == 0 && !SVFUtil::isa<StructType>(value->getType()))
+            const auto* constant = SVFUtil::dyn_cast<ConstantInt>(index.get());
+            return constant && constant->isZero();
+        });
+        if (zeroIndices && !SVFUtil::isa<StructType>(value->getType()))
             value = gep->getPointerOperand();
     }
     else if (const LoadInst* load = SVFUtil::dyn_cast<LoadInst>(value))

@@ -32,6 +32,7 @@
 
 #include "Util/SVFUtil.h"
 #include "SVF-LLVM/BasicTypes.h"
+#include "SVFValues/SVFVariables.h"
 #include "Util/ThreadAPI.h"
 #include "Util/Options.h"
 
@@ -92,12 +93,20 @@ inline double getDoubleValue(const ConstantFP* fpValue)
     return dval;
 }
 
-inline std::pair<s64_t, u64_t> getIntegerValue(const ConstantInt* intValue)
+inline std::pair<s64_t, u64_t> getIntegerValue(const ConstantInt* integer)
 {
-    if (intValue->getBitWidth() <= 64 && intValue->getBitWidth() >= 1)
-        return std::make_pair(intValue->getSExtValue(), intValue->getZExtValue());
-    else
-        return std::make_pair(0,0);
+    const auto& bits = integer->getValue();
+    return {bits.isSignedIntN(64) ? bits.getSExtValue() : 0,
+            bits.isIntN(64) ? bits.getZExtValue() : 0};
+}
+
+inline IntegerLiteral getIntegerLiteral(const ConstantInt* integer)
+{
+    const auto& bits = integer->getValue();
+    IntegerLiteral result{bits.getBitWidth(), bits.isSignedIntN(64), {}};
+    if (result.bitWidth > 64)
+        result.wideWords.assign(bits.getRawData(), bits.getRawData() + bits.getNumWords());
+    return result;
 }
 
 /// Return LLVM callsite given a value

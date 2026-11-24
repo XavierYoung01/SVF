@@ -65,6 +65,7 @@ protected:
     bool widenCycleState(const SVF::AbstractDomain&, const SVF::AbstractDomain&, const ICFGCycleWTO*) override;
     bool narrowCycleState(const SVF::AbstractDomain&, const SVF::AbstractDomain&, const ICFGCycleWTO*) override;
     virtual State propagatedState(const State& state) const;
+    std::set<SVF::Variable> scalarVariables(const State& state) const;
     void forgetScalarValues(State& state) const;
     void updateFlowState(const ICFGNode*, State state);
     void collectComponentScalarInputs(const ICFGNode*, State&) override;

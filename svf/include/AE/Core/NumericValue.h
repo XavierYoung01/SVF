@@ -39,6 +39,7 @@
 #include <limits>
 #include <utility>
 
+#include "AE/Core/CheckedInt64.h"
 #include "Util/GeneralType.h"
 
 namespace SVF
@@ -303,13 +304,10 @@ public:
         if (lhs.is_minus_infinity() || rhs.is_minus_infinity())
             return minus_infinity();
 
-        const s64_t min = std::numeric_limits<s64_t>::min();
-        const s64_t max = std::numeric_limits<s64_t>::max();
-        if (rhs._iVal > 0 && lhs._iVal > max - rhs._iVal)
-            return plus_infinity();
-        if (rhs._iVal < 0 && lhs._iVal < min - rhs._iVal)
-            return minus_infinity();
-        return lhs._iVal + rhs._iVal;
+        std::int64_t result;
+        if (CheckedInt64::add(lhs._iVal, rhs._iVal, result))
+            return result;
+        return rhs._iVal < 0 ? minus_infinity() : plus_infinity();
     }
 
     static BoundedInt safeSub(const BoundedInt& lhs, const BoundedInt& rhs)
@@ -325,13 +323,10 @@ public:
         if (lhs.is_minus_infinity() || rhs.is_plus_infinity())
             return minus_infinity();
 
-        const s64_t min = std::numeric_limits<s64_t>::min();
-        const s64_t max = std::numeric_limits<s64_t>::max();
-        if (rhs._iVal < 0 && lhs._iVal > max + rhs._iVal)
-            return plus_infinity();
-        if (rhs._iVal > 0 && lhs._iVal < min + rhs._iVal)
-            return minus_infinity();
-        return lhs._iVal - rhs._iVal;
+        std::int64_t result;
+        if (CheckedInt64::sub(lhs._iVal, rhs._iVal, result))
+            return result;
+        return rhs._iVal > 0 ? minus_infinity() : plus_infinity();
     }
 
     static BoundedInt safeMul(const BoundedInt& lhs, const BoundedInt& rhs)
@@ -345,23 +340,10 @@ public:
             return negative ? minus_infinity() : plus_infinity();
         }
 
-        const s64_t min = std::numeric_limits<s64_t>::min();
-        const s64_t max = std::numeric_limits<s64_t>::max();
-        if (lhs._iVal > 0)
-        {
-            if (rhs._iVal > 0 && lhs._iVal > max / rhs._iVal)
-                return plus_infinity();
-            if (rhs._iVal < 0 && rhs._iVal < min / lhs._iVal)
-                return minus_infinity();
-        }
-        else
-        {
-            if (rhs._iVal > 0 && lhs._iVal < min / rhs._iVal)
-                return minus_infinity();
-            if (rhs._iVal < 0 && lhs._iVal < max / rhs._iVal)
-                return plus_infinity();
-        }
-        return lhs._iVal * rhs._iVal;
+        std::int64_t result;
+        if (CheckedInt64::mul(lhs._iVal, rhs._iVal, result))
+            return result;
+        return (lhs._iVal < 0) != (rhs._iVal < 0) ? minus_infinity() : plus_infinity();
     }
 
     static BoundedInt safeDiv(const BoundedInt& lhs, const BoundedInt& rhs)
@@ -373,10 +355,10 @@ public:
         }
         if (!lhs.is_infinity() && !rhs.is_infinity())
         {
-            if (lhs._iVal == std::numeric_limits<s64_t>::min() &&
-                    rhs._iVal == -1)
-                return plus_infinity();
-            return lhs._iVal / rhs._iVal;
+            std::int64_t result;
+            if (CheckedInt64::div(lhs._iVal, rhs._iVal, result))
+                return result;
+            return plus_infinity();
         }
         if (!lhs.is_infinity())
             return 0;

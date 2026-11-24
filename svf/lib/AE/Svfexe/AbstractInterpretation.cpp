@@ -88,7 +88,7 @@ void AbstractInterpretation::initializeObjectValue(
     {
         if (const auto* integer = SVFUtil::dyn_cast<ConstIntObjVar>(object))
             interval =
-                SVF::Interval::singleton(SVF::Rational(integer->getSExtValue()));
+                SVF::Interval::singleton(SVFIRAdapter::integerConstant(*integer));
         else if (const auto* floating =
                      SVFUtil::dyn_cast<ConstFPObjVar>(object))
             interval = SVFIRAdapter::floatingConstant(floating->getFPValue());
@@ -120,6 +120,27 @@ void AbstractInterpretation::runOnModule()
 AbstractInterpretation::AbstractInterpretation()
     : adapter_(*PAG::getPAG())
 {
+    if (Options::AEHashStorage())
+    {
+        boxStorage_ = {BoxStorage::Hash, BoxStorage::Hash};
+        addressStorage_ = AddressSetStorage::Hash;
+    }
+    else
+    {
+        switch (Options::AESparsity())
+        {
+        case AESparsity::SemiSparse:
+            boxStorage_ = {BoxStorage::Hash, BoxStorage::Page8};
+            addressStorage_ = AddressSetStorage::FourWithPrivateOverflow;
+            break;
+        case AESparsity::Sparse:
+            boxStorage_ = {BoxStorage::Page16, BoxStorage::Page16};
+            break;
+        default:
+            boxStorage_ = {BoxStorage::Page4, BoxStorage::Page16};
+            break;
+        }
+    }
     stat = new AEStat(this);
     // Run Andersen's pointer analysis and build WTO
     svfir = PAG::getPAG();
@@ -290,6 +311,14 @@ void AbstractInterpretation::analyzeFromAllProgEntries()
 /// calling findBackingLoad(%a) returns the LoadStmt, and we can then
 /// narrow the ObjVar behind %p.
 ///
+static unsigned integerWidth(const SVFVar& variable)
+{
+    const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(variable.getType());
+    if (!type)
+        return 0;
+    return type->getBitWidth() ? type->getBitWidth() : type->getByteSize() * 8;
+}
+
 /// Follows one level of CopyStmt (e.g., zext/sext) if the load is not
 /// directly on the cmp operand. Returns nullptr if no load is found.
 static const LoadStmt* findBackingLoad(const SVFVar* var)
@@ -395,6 +424,20 @@ static SVF::Interval computeCmpConstraint(s32_t predicate, s64_t succ,
         predicate = it->second;
     }
 
+    if (predicate >= CmpStmt::ICMP_UGT && predicate <= CmpStmt::ICMP_ULE)
+    {
+        const auto isNonnegative = [](const Interval& interval)
+        {
+            return interval.lower().isFinite() && interval.lower().value().sign() >= 0;
+        };
+        const auto isNegative = [](const Interval& interval)
+        {
+            return interval.upper().isFinite() && interval.upper().value().sign() < 0;
+        };
+        if (!(isNonnegative(self) && isNonnegative(other)) &&
+                !(isNegative(self) && isNegative(other)))
+            return SVF::Interval::top();
+    }
     // Now compute the constraint on LHS given: LHS <predicate> other
     SVF::Interval result = self;
     switch (predicate)
@@ -562,7 +605,12 @@ bool AbstractInterpretation::collectBranchRefinement(
                 getAddressSet(cmpStmt->getOpVar(1), pred)
             };
 
-            if ((opVal[0].isBottom() || opVal[1].isBottom()) &&
+            if (predicate >= CmpStmt::ICMP_SGT && predicate <= CmpStmt::ICMP_SLE &&
+                    integerWidth(*cmpStmt->getOpVar(0)) == 1)
+            {
+                // The signed i1 ordering reverses the stored Boolean order.
+            }
+            else if ((opVal[0].isBottom() || opVal[1].isBottom()) &&
                     (!opAddr[0].isBottom() || !opAddr[1].isBottom()))
             {
                 // Pointer-valued cmp: branch feasibility only.
@@ -1149,10 +1197,38 @@ void AbstractInterpretation::updateStateOnAddr(const AddrStmt* addr)
     SVF::Interval interval = SVF::Interval::bottom();
     SVF::AddressSet addresses = SVF::AddressSet::bottom();
     initializeObjectValue(object, interval, addresses, node);
-    if (addr->getRHSVar()->getType()->getKind() == SVFType::SVFIntegerTy)
+    if (!SVFUtil::isa<ConstIntObjVar>(object) &&
+            object->getType()->getKind() == SVFType::SVFIntegerTy)
         interval.meetWith(
             utils->getRangeLimitFromType(addr->getRHSVar()->getType()));
     updateValue(addr->getLHSVar(), interval, addresses, node);
+}
+
+static Interval unsignedWrappingOperation(const BinaryOPStmt& binary, const Interval& lhs,
+                                          const Interval& rhs, unsigned width)
+{
+    const auto left = SVF::wrapIntegerInterval(lhs, width, false);
+    const auto right = SVF::wrapIntegerInterval(rhs, width, false);
+    Interval result;
+    switch (binary.getOpcode())
+    {
+    case BinaryOPStmt::Add:
+        result = SVF::add(left, right);
+        break;
+    case BinaryOPStmt::Sub:
+        result = SVF::subtract(left, right);
+        break;
+    case BinaryOPStmt::Mul:
+        result = SVF::multiply(left, right);
+        break;
+    case BinaryOPStmt::Shl:
+        result = SVF::shiftLeft(left, rhs);
+        break;
+    default:
+        return Interval::top();
+    }
+    result.meetWith(SVF::integerRange(width, false));
+    return result;
 }
 
 void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
@@ -1165,8 +1241,34 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
         lhs = SVF::Interval::top();
     if (rhs.isBottom())
         rhs = SVF::Interval::top();
+    const auto opcode = binary->getOpcode();
+    const auto width = integerWidth(*binary->getRes());
+    const bool shift = opcode == BinaryOPStmt::Shl || opcode == BinaryOPStmt::LShr ||
+                       opcode == BinaryOPStmt::AShr;
+    if (width && shift &&
+            !rhs.isSubsetOf(Interval::closed(Rational(0), Rational(width - 1))))
+    {
+        updateInterval(binary->getRes(), Interval::top(), node);
+        return;
+    }
+
+    if (width && (opcode == BinaryOPStmt::UDiv || opcode == BinaryOPStmt::URem ||
+                  opcode == BinaryOPStmt::LShr))
+    {
+        lhs = SVF::wrapIntegerInterval(lhs, width, false);
+        if (!shift)
+            rhs = SVF::wrapIntegerInterval(rhs, width, false);
+    }
+    else if (width == 1 && (opcode == BinaryOPStmt::SDiv || opcode == BinaryOPStmt::SRem ||
+                            opcode == BinaryOPStmt::AShr))
+    {
+        lhs = SVF::wrapIntegerInterval(lhs, width, true);
+        if (!shift)
+            rhs = SVF::wrapIntegerInterval(rhs, width, true);
+    }
+
     SVF::Interval result;
-    switch (binary->getOpcode())
+    switch (opcode)
     {
     case BinaryOPStmt::Add:
     case BinaryOPStmt::FAdd:
@@ -1183,7 +1285,7 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
     case BinaryOPStmt::SDiv:
     case BinaryOPStmt::FDiv:
     case BinaryOPStmt::UDiv:
-        result = SVF::divide(lhs, rhs);
+        result = SVF::divide(lhs, rhs, width != 0);
         break;
     case BinaryOPStmt::SRem:
     case BinaryOPStmt::FRem:
@@ -1210,6 +1312,22 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
         break;
     default:
         assert(false && "undefined binary: ");
+    }
+    if (width && !result.isTop())
+    {
+        // No-wrap flags constrain the result on defined executions. Retain
+        // the defined portion of an interval that also contains overflow.
+        if (binary->hasNoUnsignedWrap())
+        {
+            auto defined = unsignedWrappingOperation(*binary, lhs, rhs, width);
+            if (!binary->hasNoSignedWrap() || defined.isBottom())
+                result = std::move(defined);
+        }
+        if (binary->hasNoSignedWrap())
+            result.meetWith(SVF::integerRange(width, true));
+
+        result = result.isBottom() ? Interval::top()
+                                   : SVF::wrapIntegerInterval(result, width, width != 1);
     }
     updateInterval(binary->getRes(), result, node);
 }
@@ -1314,6 +1432,16 @@ void AbstractInterpretation::updateStateOnCmp(const CmpStmt* cmp)
     }
     else
     {
+        const auto width = integerWidth(*cmp->getOpVar(typedOperand));
+        const bool unsignedOrder = predicate >= CmpStmt::ICMP_UGT &&
+                                   predicate <= CmpStmt::ICMP_ULE;
+        const bool signedOrder = predicate >= CmpStmt::ICMP_SGT &&
+                                 predicate <= CmpStmt::ICMP_SLE;
+        if (width && (unsignedOrder || (signedOrder && width == 1)))
+        {
+            lhsInterval = SVF::wrapIntegerInterval(lhsInterval, width, signedOrder);
+            rhsInterval = SVF::wrapIntegerInterval(rhsInterval, width, signedOrder);
+        }
         // An LLVM comparison remains Boolean even if a sparse operand
         // summary is unavailable.
         switch (predicate)
@@ -1410,15 +1538,15 @@ void AbstractInterpretation::updateStateOnCopy(const CopyStmt* copy)
     }
     else if (copy->getCopyKind() == CopyStmt::ZEXT)
     {
-        const auto* sourceType = SVFUtil::dyn_cast<SVFIntegerType>(rhsVar->getType());
-        const u32_t bits = rhsVar->getType()->getByteSize() * 8;
-        updateInterval(lhsVar, sourceType && rhsInterval.isSingleton()
-                       ? (bits == 64 ? rhsInterval : SVF::zeroExtendIntegerInterval(rhsInterval, bits, true))
-                       : SVF::Interval::top(), node);
+        const auto bits = integerWidth(*rhsVar);
+        updateInterval(lhsVar, bits ? SVF::wrapIntegerInterval(rhsInterval, bits, false)
+                                   : SVF::Interval::top(), node);
     }
     else if (copy->getCopyKind() == CopyStmt::SEXT)
     {
-        updateInterval(lhsVar, rhsInterval, node);
+        const auto bits = integerWidth(*rhsVar);
+        updateInterval(lhsVar, bits == 1 ? SVF::wrapIntegerInterval(rhsInterval, bits, true)
+                                        : rhsInterval, node);
     }
     else if (copy->getCopyKind() == CopyStmt::FPTOSI)
     {
@@ -1438,16 +1566,9 @@ void AbstractInterpretation::updateStateOnCopy(const CopyStmt* copy)
     }
     else if (copy->getCopyKind() == CopyStmt::TRUNC)
     {
-        const auto* destinationType =
-            SVFUtil::dyn_cast<SVFIntegerType>(lhsVar->getType());
-        updateInterval(
-            lhsVar,
-            destinationType
-            ? SVF::wrapIntegerInterval(rhsInterval,
-                                       lhsVar->getType()->getByteSize() * 8,
-                                       destinationType->isSigned())
-            : SVF::Interval::top(),
-            node);
+        const auto bits = integerWidth(*lhsVar);
+        updateInterval(lhsVar, bits ? SVF::wrapIntegerInterval(rhsInterval, bits, bits != 1)
+                                   : SVF::Interval::top(), node);
     }
     else if (copy->getCopyKind() == CopyStmt::FPTRUNC)
     {

@@ -89,9 +89,12 @@ struct NumericType
 class Variable
 {
 public:
+    enum class Role : std::uint8_t { Value, ObjectContent };
+
     explicit Variable(std::uint32_t id = 0,
-                      NumericType type = NumericType::integer())
-        : id_(id), type_(type)
+                      NumericType type = NumericType::integer(),
+                      Role role = Role::Value)
+        : id_(id), type_(type), role_(role)
     {
     }
 
@@ -103,10 +106,12 @@ public:
     {
         return type_;
     }
+    Role role() const { return role_; }
 
     friend bool operator==(Variable lhs, Variable rhs)
     {
-        return lhs.id_ == rhs.id_ && lhs.type_ == rhs.type_;
+        return lhs.id_ == rhs.id_ && lhs.type_ == rhs.type_ &&
+               lhs.role_ == rhs.role_;
     }
     friend bool operator!=(Variable lhs, Variable rhs)
     {
@@ -116,15 +121,16 @@ public:
     {
         return std::tie(lhs.id_, lhs.type_.kind,
                         lhs.type_.floatFormat.exponentBits,
-                        lhs.type_.floatFormat.significandBits) <
+                        lhs.type_.floatFormat.significandBits, lhs.role_) <
                std::tie(rhs.id_, rhs.type_.kind,
                         rhs.type_.floatFormat.exponentBits,
-                        rhs.type_.floatFormat.significandBits);
+                        rhs.type_.floatFormat.significandBits, rhs.role_);
     }
 
 private:
     std::uint32_t id_;
     NumericType type_;
+    Role role_;
 };
 
 enum class CheckResult

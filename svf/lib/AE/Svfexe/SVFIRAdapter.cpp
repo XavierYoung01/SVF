@@ -32,9 +32,7 @@
 #include "Util/SVFUtil.h"
 
 #include <cmath>
-#include <limits>
 #include <string>
-#include <utility>
 
 namespace SVF
 {
@@ -106,25 +104,15 @@ SVF::NumericType contentNumericType(const ObjVar& object)
                        elementType && elementType->isPointerTy());
 }
 
-Variable nextVariable(std::uint64_t& next,
-                      SVF::NumericType type)
+template <typename Constant>
+Rational integerValue(const Constant& value)
 {
-    if (next > std::numeric_limits<std::uint32_t>::max())
-    {
-        assert(false && "too many abstract-domain variables");
-        std::abort();
-    }
-    return Variable(static_cast<std::uint32_t>(next++), type);
-}
-
-Location nextLocation(std::uint64_t& next)
-{
-    if (next > std::numeric_limits<std::uint32_t>::max())
-    {
-        assert(false && "too many abstract-domain locations");
-        std::abort();
-    }
-    return Location(static_cast<std::uint32_t>(next++));
+    const auto& literal = value.getIntegerLiteral();
+    if (literal.bitWidth == 1)
+        return Rational(static_cast<std::int64_t>(value.getZExtValue()));
+    if (literal.fitsSigned64)
+        return Rational(value.getSExtValue());
+    return Rational::fromIntegerBits(literal.wideWords.data(), literal.bitWidth, true);
 }
 
 } // namespace
@@ -137,154 +125,71 @@ SVF::Interval SVFIRAdapter::floatingConstant(double value)
                SVF::Rational(static_cast<s64_t>(value)));
 }
 
-SVFIRAdapter::SVFIRAdapter(const PAG& svfir)
+Rational SVFIRAdapter::integerConstant(const ConstIntValVar& value)
 {
-    auto addScalars = [&](bool pointers)
-    {
-        for (auto iterator = svfir.begin(); iterator != svfir.end(); ++iterator)
-        {
-            const SVFVar* svfVariable = iterator->second;
-            const auto* value = SVFUtil::dyn_cast<ValVar>(svfVariable);
-            if (!value || value->isPointer() != pointers)
-                continue;
-            // Integer/floating aggregate constants are interpreted directly
-            // and need no scalar slot.  Pointer constants (notably constant
-            // expression GEPs in global initializers) are transfer results and
-            // must retain their computed AddressSet.
-            if (!pointers && value->isConstDataOrAggDataButNotNullPtr())
-                continue;
-            const Variable variable =
-                nextVariable(nextVariableId_, numericType(*value));
-            variables_.emplace(value, variable);
-            valuesByVariableId_.resize(variable.id() + 1);
-            valuesByVariableId_[variable.id()] = value;
-        }
-    };
+    return integerValue(value);
+}
 
-    auto addObjectContents = [&](bool pointers)
-    {
-        for (auto iterator = svfir.begin(); iterator != svfir.end(); ++iterator)
-        {
-            const SVFVar* svfVariable = iterator->second;
-            const auto* object = SVFUtil::dyn_cast<ObjVar>(svfVariable);
-            if (!object || object->isPointer() != pointers)
-                continue;
+Rational SVFIRAdapter::integerConstant(const ConstIntObjVar& value)
+{
+    return integerValue(value);
+}
 
+SVFIRAdapter::SVFIRAdapter(const PAG& svfir) : pag_(svfir)
+{
+    for (const auto& entry : pag_)
+    {
+        if (const auto* object = SVFUtil::dyn_cast<ObjVar>(entry.second))
             registerObject(*object);
-        }
-    };
-
-    // One stable analysis-wide ID space doubles as the sparse storage
-    // coordinate. Pack it by Semi-Sparse carrier first and domain second:
-    //
-    //   numerical ValVars | pointer ValVars | numerical contents | pointer
-    //   contents
-    //
-    // Every scalar/flow domain slice is a contiguous range. Dense states use
-    // two compact ranges per domain; the sparse page directory does not
-    // allocate their intervening range. Keeping all ValVars before contents
-    // also keeps both O(1) reverse-index vectors compact.
-    addScalars(false);
-    addScalars(true);
-    if (nextVariableId_ > std::numeric_limits<std::uint32_t>::max())
-    {
-        assert(false && "too many abstract-domain scalar variables");
-        std::abort();
     }
-    firstObjectContentVariableId_ =
-        static_cast<std::uint32_t>(nextVariableId_);
-    addObjectContents(false);
-    addObjectContents(true);
 }
 
 void SVFIRAdapter::registerObject(const ObjVar& object) const
 {
-    if (locations_.count(&object) != 0)
-        return;
-
-    const Location location = nextLocation(nextLocationId_);
-    const Variable content =
-        nextVariable(nextVariableId_, contentNumericType(object));
-    locations_.emplace(&object, location);
-    objects_.emplace(location, &object);
-    contentVariables_.emplace(&object, content);
-    contentObjectsByVariableId_.resize(content.id() + 1);
-    contentObjectsByVariableId_[content.id()] = &object;
-    memoryLayout_.extend(location, content);
+    const Location key = location(object);
+    if (!memoryLayout_.contains(key))
+        memoryLayout_.extend(key, contentVariable(object));
 }
 
 bool SVFIRAdapter::contains(const ValVar& value) const
 {
-    return variables_.count(&value) != 0;
+    // Directly interpreted numeric constants need no state entry. Pointer
+    // constants still carry transfer results, such as initializer GEPs.
+    return value.isPointer() || !value.isConstDataOrAggDataButNotNullPtr();
 }
 
-bool SVFIRAdapter::contains(const ObjVar& object) const
+bool SVFIRAdapter::isScalar(Variable variable) const
 {
-    return locations_.count(&object) != 0;
+    return variable.role() == Variable::Role::Value;
 }
 
 Variable SVFIRAdapter::variable(const ValVar& value) const
 {
-    const auto iterator = variables_.find(&value);
-    if (iterator == variables_.end())
-    {
-        assert(false && "ValVar is not tracked by this adapter");
-        std::abort();
-    }
-    return iterator->second;
+    assert(contains(value) && "ValVar is not tracked by this adapter");
+    return Variable(value.getId(), numericType(value));
 }
 
 const ValVar* SVFIRAdapter::value(Variable variable) const
 {
-    return variable.id() < valuesByVariableId_.size()
-           ? valuesByVariableId_[variable.id()]
-           : nullptr;
+    return isScalar(variable) ? pag_.getValVar(variable.id()) : nullptr;
 }
 
 Location SVFIRAdapter::location(const ObjVar& object) const
 {
-    const auto iterator = locations_.find(&object);
-    if (iterator != locations_.end())
-        return iterator->second;
-    registerObject(object);
-    return locations_.find(&object)->second;
+    return Location(object.getId());
 }
 
 Variable SVFIRAdapter::contentVariable(const ObjVar& object) const
 {
-    const auto iterator = contentVariables_.find(&object);
-    if (iterator != contentVariables_.end())
-        return iterator->second;
-    registerObject(object);
-    return contentVariables_.find(&object)->second;
-}
-
-const ObjVar* SVFIRAdapter::contentObject(Variable variable) const
-{
-    return variable.id() < contentObjectsByVariableId_.size()
-           ? contentObjectsByVariableId_[variable.id()]
-           : nullptr;
-}
-
-bool SVFIRAdapter::isPointer(Variable variable) const
-{
-    if (const ValVar* scalar = value(variable))
-        return scalar->isPointer();
-    if (const ObjVar* object = contentObject(variable))
-        return object->isPointer();
-    assert(false && "Variable is not tracked by this adapter");
-    std::abort();
+    return Variable(object.getId(), contentNumericType(object),
+                    Variable::Role::ObjectContent);
 }
 
 const ObjVar& SVFIRAdapter::object(Location location) const
 {
-    const auto iterator = objects_.find(location);
-    if (iterator == objects_.end())
-    {
-        assert(false && "location is not tracked by this adapter");
-        std::abort();
-    }
-    return *iterator->second;
+    const auto* result = pag_.getObjVar(location.id());
+    assert(result && "address does not denote an object");
+    return *result;
 }
 
 } // namespace SVF

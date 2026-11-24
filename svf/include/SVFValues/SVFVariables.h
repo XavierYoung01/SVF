@@ -1521,6 +1521,14 @@ public:
     virtual const std::string toString() const;
 };
 
+/// LLVM integer bits without a dependency on the LLVM APInt type.
+struct IntegerLiteral
+{
+    unsigned bitWidth = 64;
+    bool fitsSigned64 = true;
+    std::vector<std::uint64_t> wideWords;
+};
+
 class ConstIntValVar : public ConstDataValVar
 {
 
@@ -1530,6 +1538,7 @@ class ConstIntValVar : public ConstDataValVar
 private:
     u64_t zval;
     s64_t sval;
+    IntegerLiteral literal;
 
 public:
     ///  Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -1560,6 +1569,8 @@ public:
     }
     //@}
 
+    const IntegerLiteral& getIntegerLiteral() const { return literal; }
+
     s64_t getSExtValue() const
     {
         return sval;
@@ -1572,8 +1583,10 @@ public:
     }
 
     /// Constructor
-    ConstIntValVar(NodeID i, s64_t sv, u64_t zv, const ICFGNode* icn, const SVFType* svfType)
-        : ConstDataValVar(i,  icn, svfType, ConstIntValNode), zval(zv), sval(sv)
+    ConstIntValVar(NodeID i, s64_t sv, u64_t zv, const ICFGNode* icn, const SVFType* svfType,
+                   IntegerLiteral bits = {})
+        : ConstDataValVar(i, icn, svfType, ConstIntValNode), zval(zv), sval(sv),
+          literal(std::move(bits))
     {
 
     }
@@ -1795,6 +1808,7 @@ class ConstIntObjVar : public ConstDataObjVar
 private:
     u64_t zval;
     s64_t sval;
+    IntegerLiteral literal;
 
 public:
     //@{ Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -1831,6 +1845,8 @@ public:
         return node->getNodeKind() == SVFVar::ConstIntObjNode;
     }
 
+    const IntegerLiteral& getIntegerLiteral() const { return literal; }
+
     s64_t getSExtValue() const
     {
         return sval;
@@ -1844,8 +1860,10 @@ public:
     //@}
 
     /// Constructor
-    ConstIntObjVar(NodeID i, s64_t sv, u64_t zv, ObjTypeInfo* ti, const ICFGNode* node)
-        : ConstDataObjVar(i, ti, node, ConstIntObjNode), zval(zv), sval(sv)
+    ConstIntObjVar(NodeID i, s64_t sv, u64_t zv, ObjTypeInfo* ti, const ICFGNode* node,
+                   IntegerLiteral bits = {})
+        : ConstDataObjVar(i, ti, node, ConstIntObjNode), zval(zv), sval(sv),
+          literal(std::move(bits))
     {
     }
 

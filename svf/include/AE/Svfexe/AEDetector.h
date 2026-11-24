@@ -250,13 +250,19 @@ public:
         }
 
         // Add the bug to the recorder with details from the event stack
-        const auto value = [](const Bound& bound)
+        const auto value = [](const Bound& bound) -> BoundedInt
         {
-            if (bound.isFinite())
-                return bound.value().toDouble();
-            return bound.kind() == Bound::Kind::MinusInfinity
-                   ? -std::numeric_limits<double>::infinity()
-                   : std::numeric_limits<double>::infinity();
+            if (bound.isMinusInfinity())
+                return BoundedInt::minus_infinity();
+            if (bound.isPlusInfinity())
+                return BoundedInt::plus_infinity();
+            const Rational& endpoint = bound.value();
+            const Rational integer = endpoint.sign() < 0 ? endpoint.ceil() : endpoint.floor();
+            std::int64_t result;
+            if (integer.tryToInt64(result))
+                return result;
+            return endpoint.sign() < 0 ? BoundedInt::minus_infinity()
+                                       : BoundedInt::plus_infinity();
         };
         recoder.addAbsExecBug(GenericBug::FULLBUFOVERFLOW, eventStack,
                               value(info.bufferSize.lower()), value(info.bufferSize.upper()),

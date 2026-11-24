@@ -778,6 +778,12 @@ const Option<u32_t> Options::LoopBound(
     1
 );
 
+const Option<bool> Options::AEHashStorage(
+    "ae-hash-storage",
+    "Use ordinary Box tables and hash-based address sets for comparison",
+    false
+);
+
 const OptionMap<u32_t> Options::AESparsity(
     "ae-sparsity",
     "Abstract execution mode (Default: dense)",

@@ -461,6 +461,8 @@ protected:
     PAG* svfir{nullptr};
     AEWTO* preAnalysis{nullptr};
     SVFIRAdapter adapter_;
+    BoxStorageConfig boxStorage_;
+    AddressSetStorage addressStorage_ = AddressSetStorage::OneWithSharedOverflow;
     bool equivalentValues(const State& left, const State& right) const;
 
     Map<const ICFGNode*, State> abstractTrace_;

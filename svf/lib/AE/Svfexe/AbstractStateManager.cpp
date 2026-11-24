@@ -58,12 +58,27 @@ SVF::Interval finiteInterval(s64_t lower, s64_t upper)
     return SVF::Interval::closed(SVF::Rational(lower), SVF::Rational(upper));
 }
 
+Interval gepIndexInterval(const Interval& value, const ValVar& index,
+                          const AccessPath& path)
+{
+    const auto width = path.getIndexBitWidth();
+    const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(index.getType());
+    if (!width || !type || !type->getBitWidth())
+        return value;
+
+    // LLVM sign-extends (including i1) or truncates GEP indices to the
+    // index width of the pointer's address space.
+    if (type->getBitWidth() > width || type->getBitWidth() == 1)
+        return wrapIntegerInterval(value, std::min(width, type->getBitWidth()), true);
+    return value;
+}
+
 bool constantInterval(const ValVar* value, SVF::Interval& interval)
 {
     if (const auto* integer = SVFUtil::dyn_cast<ConstIntValVar>(value))
     {
         interval =
-            SVF::Interval::singleton(SVF::Rational(integer->getSExtValue()));
+            SVF::Interval::singleton(SVFIRAdapter::integerConstant(*integer));
         return true;
     }
     if (const auto* floating = SVFUtil::dyn_cast<ConstFPValVar>(value))
@@ -107,24 +122,14 @@ SVF::Interval AbstractInterpretation::getGepElementIndex(const GepStmt* gep)
         const SVFType* type =
             gep->getOffsetVarAndGepTypePairVec()[index].second;
 
-        s64_t lower = 0;
-        s64_t upper = 0;
-        if (const auto* integer = SVFUtil::dyn_cast<ConstIntValVar>(variable))
-        {
-            lower = upper = integer->getSExtValue();
-        }
-        else
-        {
-            const SVF::Interval value = getInterval(variable, node);
-            // Original treats an uninitialized index as zero, not as an
-            // unknown range spanning every field. Keep this AE policy apart
-            // from the domain's Top/Bottom and finite-endpoint semantics.
-            if (!value.isBottom())
-            {
-                lower = finiteEndpoint(value.lower(), 0);
-                upper = finiteEndpoint(value.upper(), Options::MaxFieldLimit());
-            }
-        }
+        const Interval value = gepIndexInterval(getInterval(variable, node), *variable,
+                                                gep->getAccessPath());
+        const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
+        // For an unavailable index, keep the existing zero-field policy.
+        s64_t lower = value.isBottom() ? 0 : finiteEndpoint(value.lower(), 0);
+        s64_t upper = value.isBottom() ? 0 : finiteEndpoint(value.upper(), limit);
+        lower = std::clamp(lower, -limit, limit);
+        upper = std::clamp(upper, -limit, limit);
 
         if (SVFUtil::isa<SVFPointerType>(type))
         {
@@ -137,7 +142,7 @@ SVF::Interval AbstractInterpretation::getGepElementIndex(const GepStmt* gep)
                     ? Options::MaxFieldLimit()
                     : upper * elements;
         }
-        else if (Options::ModelArrays())
+        else if (type && Options::ModelArrays())
         {
             const std::vector<u32_t>& flattened =
                 PAG::getPAG()->getTypeInfo(type)->getFlattenedElemIdxVec();
@@ -152,7 +157,7 @@ SVF::Interval AbstractInterpretation::getGepElementIndex(const GepStmt* gep)
                 upper = PAG::getPAG()->getFlattenedElemIdx(type, upper);
             }
         }
-        else
+        else if (type)
         {
             lower = upper = 0;
         }
@@ -190,22 +195,11 @@ SVF::Interval AbstractInterpretation::getGepByteOffset(const GepStmt* gep)
                 elementSize =
                     gep->getAccessPath().gepSrcPointeeType()->getByteSize();
 
-            s64_t lower = 0;
-            s64_t upper = 0;
-            if (const auto* integer =
-                        SVFUtil::dyn_cast<ConstIntValVar>(variable))
-            {
-                lower = upper = integer->getSExtValue();
-            }
-            else
-            {
-                const SVF::Interval value = getInterval(variable, node);
-                lower = finiteEndpoint(value.lower(), 0);
-                upper = finiteEndpoint(value.upper(),
-                                       Options::MaxFieldLimit());
-            }
-            lower = std::max<s64_t>(0, lower);
-            upper = std::max<s64_t>(0, upper);
+            const Interval value = gepIndexInterval(getInterval(variable, node), *variable,
+                                                    gep->getAccessPath());
+            const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
+            s64_t lower = std::max<s64_t>(0, finiteEndpoint(value.lower(), 0));
+            s64_t upper = std::max<s64_t>(0, finiteEndpoint(value.upper(), limit));
             lower = (double)Options::MaxFieldLimit() / elementSize >= lower
                     ? lower * elementSize
                     : Options::MaxFieldLimit();
@@ -243,8 +237,9 @@ SVF::AddressSet AbstractInterpretation::getGepObjAddrs(
                bound.isPlusInfinity() ? std::numeric_limits<s64_t>::max() :
                bound.value().toInt64();
     };
-    const APOffset lower = std::min<s64_t>(endpoint(offset.lower()), Options::MaxFieldLimit());
-    const APOffset upper = std::min<s64_t>(endpoint(offset.upper()), Options::MaxFieldLimit());
+    const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
+    const APOffset lower = std::clamp(endpoint(offset.lower()), -limit, limit);
+    const APOffset upper = std::clamp(endpoint(offset.upper()), -limit, limit);
     for (APOffset index = lower; index <= upper; ++index)
         for (SVF::Location location : bases)
         {
@@ -321,7 +316,10 @@ bool AbstractInterpretation::hasAbsState(const ICFGNode* node) const
 
 SVF::Location AbstractInterpretation::locationOf(const ObjVar* object) const
 {
-    return object ? adapter_.location(*object) : SVF::Location::null();
+    if (!object)
+        return SVF::Location::null();
+    adapter_.registerObject(*object);
+    return adapter_.location(*object);
 }
 
 const ObjVar* AbstractInterpretation::objectAt(SVF::Location location) const
@@ -332,19 +330,22 @@ const ObjVar* AbstractInterpretation::objectAt(SVF::Location location) const
 AbstractInterpretation::State AbstractInterpretation::topState()
 const
 {
-    return State(makeNumericalDomain(false), adapter_.memoryLayout(), true);
+    return State(makeNumericalDomain(false), adapter_.memoryLayout(), true, addressStorage_);
 }
 
 AbstractInterpretation::State AbstractInterpretation::
 bottomState() const
 {
-    return State(makeNumericalDomain(true), adapter_.memoryLayout(), true);
+    return State(makeNumericalDomain(true), adapter_.memoryLayout(), true, addressStorage_);
 }
 
 std::unique_ptr<SVF::NumericalDomain>
 AbstractInterpretation::makeNumericalDomain(bool bottom) const
 {
-    return std::make_unique<SVF::BoxDomain>(bottom ? SVF::BoxDomain::bottom() : SVF::BoxDomain::top());
+    BoxSemanticConfig config;
+    config.storage = boxStorage_;
+    return std::make_unique<SVF::BoxDomain>(bottom ? SVF::BoxDomain::bottom(config)
+                                           : SVF::BoxDomain::top(config));
 }
 
 AbstractInterpretation::State& AbstractInterpretation::

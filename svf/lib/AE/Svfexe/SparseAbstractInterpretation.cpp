@@ -88,15 +88,26 @@ void SemiSparseAbstractInterpretation::addUninitializedNumericalAlternative(cons
     Base::addUninitializedNumericalAlternative(var, var->getICFGNode() ? var->getICFGNode() : node);
 }
 
+std::set<SVF::Variable> SemiSparseAbstractInterpretation::scalarVariables(
+    const State& state) const
+{
+    std::set<SVF::Variable> scalars;
+    const auto addScalars = [&](const std::vector<SVF::Variable>& variables)
+    {
+        for (SVF::Variable variable : variables)
+            if (adapter_.isScalar(variable))
+                scalars.insert(variable);
+    };
+    addScalars(state.initializedVariables());
+    addScalars(state.numerical().supportVariables());
+    addScalars(state.addresses().nonDefaultVariables());
+    return scalars;
+}
+
 void SemiSparseAbstractInterpretation::forgetScalarValues(State& state) const
 {
-    const SVF::Variable end = adapter_.firstObjectContentVariable();
-    for (SVF::Variable variable : state.initializedVariablesBefore(end))
+    for (SVF::Variable variable : scalarVariables(state))
         state.resetValue(variable);
-    for (SVF::Variable variable : state.numerical().supportVariablesBefore(end))
-        state.numerical().forget(variable);
-    for (SVF::Variable variable : state.addresses().nonDefaultVariablesBefore(end))
-        state.addresses().forget(variable);
 }
 
 SemiSparseAbstractInterpretation::State
@@ -112,15 +123,8 @@ void SemiSparseAbstractInterpretation::updateFlowState(const ICFGNode* node, Sta
     // SSA values remain at their definition sites when memory is replaced.
     const auto old = abstractTrace_.find(node);
     if (old != abstractTrace_.end())
-    {
-        const SVF::Variable end = adapter_.firstObjectContentVariable();
-        std::set<SVF::Variable> scalars;
-        for (SVF::Variable var : old->second.initializedVariablesBefore(end)) scalars.insert(var);
-        for (SVF::Variable var : old->second.numerical().supportVariablesBefore(end)) scalars.insert(var);
-        for (SVF::Variable var : old->second.addresses().nonDefaultVariablesBefore(end)) scalars.insert(var);
-        for (SVF::Variable var : scalars)
+        for (SVF::Variable var : scalarVariables(old->second))
             incoming.assignValueFrom(var, old->second, var);
-    }
     abstractTrace_.insert_or_assign(node, std::move(incoming));
 }
 
@@ -202,7 +206,7 @@ SemiSparseAbstractInterpretation::cloneCycleHeadState(const ICFGCycleWTO* cycle)
 
 void SemiSparseAbstractInterpretation::scatterCycleValues(const State& snapshot, const ICFGNode* node)
 {
-    for (SVF::Variable variable : snapshot.initializedVariablesBefore(adapter_.firstObjectContentVariable()))
+    for (SVF::Variable variable : snapshot.initializedVariables())
         if (const ValVar* var = adapter_.value(variable))
             updateValue(var, snapshot.interval(variable), snapshot.addressSet(variable), node);
 }
