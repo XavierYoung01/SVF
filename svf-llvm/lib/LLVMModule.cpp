@@ -164,6 +164,12 @@ void LLVMModuleSet::buildSymbolTable() const
 
 void LLVMModuleSet::build()
 {
+    if (!empty())
+    {
+        targetABI = LLVMUtil::detectTargetABI(
+                        LLVMUtil::getTargetTriple(getMainLLVMModule()));
+    }
+
     if(preProcessed==false)
         prePassSchedule();
 
@@ -743,8 +749,8 @@ void LLVMModuleSet::buildFunToFunMap()
             appModule = appFunToReplace->getParent();
         }
         Function* clonedFunction = Function::Create(extFunToClone->getFunctionType(),
-                Function::ExternalLinkage,
-                extFunToClone->getName());
+            Function::ExternalLinkage,
+            extFunToClone->getName());
         // Map the arguments of the new function to the arguments of extFunToClone
         llvm::ValueToValueMapTy valueMap;
         Function::arg_iterator destArg = clonedFunction->arg_begin();
@@ -1082,7 +1088,13 @@ NodeID LLVMModuleSet::getValueNode(const Value *llvm_value)
     if (SVFUtil::isa<ConstantPointerNull>(llvm_value))
         return svfir->nullPtrSymID();
     else if (SVFUtil::isa<UndefValue>(llvm_value))
+    {
+        // For phi ptr [ @x, ... ], [ undef, ... ], keep @x without adding
+        // a black-hole target. Integer and aggregate undef keep their model.
+        if (Options::UndefAsNull() && llvm_value->getType()->isPointerTy())
+            return svfir->nullPtrSymID();
         return svfir->blkPtrSymID();
+    }
     else
     {
         ValueToIDMapTy::const_iterator iter = valSymMap.find(llvm_value);
