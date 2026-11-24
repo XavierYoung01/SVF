@@ -567,7 +567,7 @@ bottomState() const
 std::unique_ptr<SVF::NumericalDomain>
 AbstractInterpretation::makeNumericalDomain(bool bottom) const
 {
-    if (relationalPolicy() == SyntaxPackedRelational ||
+    if (providedPacking_ || relationalPolicy() == SyntaxPackedRelational ||
             relationalPolicy() == ClosurePackedRelational ||
             relationalPolicy() == ImpactPackedRelational ||
             relationalPolicy() == LearnedPackedRelational ||

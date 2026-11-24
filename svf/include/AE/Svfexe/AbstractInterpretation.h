@@ -38,6 +38,7 @@
 #include "AE/Svfexe/AEStat.h"
 #include "AE/Svfexe/AEWTO.h"
 #include "AE/Svfexe/AbsExtAPI.h"
+#include "AE/Svfexe/PackingInput.h"
 #include "AE/Svfexe/SVFIRAdapter.h"
 #include "Graphs/CallGraph.h"
 #include "Graphs/SCC.h"
@@ -163,6 +164,14 @@ public:
     /// the native Box semi-sparse/full-sparse implementation, or the dense
     /// Box implementation. Must be called only after option parsing.
     static AbstractInterpretation& getAEInstance();
+
+    /// Select the provided-family path before the first getAEInstance() call.
+    /// Dense Octagon accepts overlapping packs. The sparse PackSSA executor
+    /// requires disjoint packs and a Post ledger. The family may be empty.
+    static AbstractInterpretation& getAEInstanceWithPacking(RelationPacking packing);
+
+    /// Same path, with the provider called before any numerical state is built.
+    static AbstractInterpretation& getAEInstanceWithPacking(PackingProvider provider);
     static bool usesPackSSA();
     static bool usesOnDemand();
     AENumericalDomain numericalDomain() const;
@@ -615,6 +624,10 @@ protected:
     State bottomState() const;
     std::unique_ptr<SVF::NumericalDomain> makeNumericalDomain(
         bool bottom) const;
+    bool initializeBuiltInPacking();
+    void initializePackingVocabulary();
+    void initializeProvidedPacking();
+    bool usesBuiltInOnDemand() const;
     void initializeRelationalPolicy();
     void initializeObjectPacking();
     void dumpFixedPacking(const char* prefix) const;
@@ -697,6 +710,8 @@ protected:
     std::shared_ptr<const std::vector<std::vector<SVF::Variable>>>
     relationalPacking_;
     std::map<const ObjVar*, std::size_t> objectPacks_;
+    bool providedPacking_ = false;
+    PackingProvider packingProvider_;
     std::size_t relationalSeedCount_ = 0;
     std::size_t relationalDroppedCount_ = 0;
     Map<const ICFGNode*, State> abstractTrace_;
@@ -783,5 +798,8 @@ protected:
     void verifyPostFixpoint();
 
     bool shouldApplyNarrowing(const FunObjVar* fun);
+
+private:
+    static AbstractInterpretation& getAEInstanceImpl(PackingProvider provider);
 };
 } // namespace SVF

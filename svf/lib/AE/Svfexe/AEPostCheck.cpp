@@ -571,6 +571,7 @@ void AbstractInterpretation::verifyPostFixpoint()
     replay.adapter_ = adapter_;
     replay.relationalVocabulary_ = relationalVocabulary_;
     replay.relationalPacking_ = relationalPacking_;
+    replay.providedPacking_ = providedPacking_;
     replay.relationalSeedCount_ = relationalSeedCount_;
     replay.relationalDroppedCount_ = relationalDroppedCount_;
     replay.utils = new AbsExtAPI(&replay);
@@ -778,7 +779,7 @@ void AbstractInterpretation::verifyPostFixpoint()
         // summaries that are absent from the propagated flow carrier; their
         // virtual caller-frame hook below already mirrors the sparse merge.
         if (Options::AESparsity() == AESparsity::Dense ||
-                usesPackSSA())
+                packSSAEnabled())
             replay.applyRelationalCallBoundary(incoming, edge, target);
         const auto targetAvailability = availability.find(target);
         if (targetAvailability != availability.end())
