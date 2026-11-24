@@ -106,7 +106,10 @@ public:
     {
         return type_;
     }
-    Role role() const { return role_; }
+    Role role() const
+    {
+        return role_;
+    }
 
     friend bool operator==(Variable lhs, Variable rhs)
     {

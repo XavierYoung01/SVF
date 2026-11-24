@@ -433,8 +433,8 @@ void AddressSet::meetWith(const AddressSet& other)
     else if (!allObjects_ && !other.allObjects_)
     {
         if (locations_.storage() == AddressSetStorage::Hash ||
-            other.locations_.storage() == AddressSetStorage::Hash ||
-            (locations_.size() <= 2 && other.locations_.size() <= 2))
+                other.locations_.storage() == AddressSetStorage::Hash ||
+                (locations_.size() <= 2 && other.locations_.size() <= 2))
         {
             for (Location location : locations_)
             {
@@ -559,7 +559,7 @@ AddressDomain AddressDomain::without(const std::set<Variable>& omitted) const
         if (first != values.end())
         {
             result.smallValues_ = std::make_shared<SmallValues>(
-                                        values.begin(), first);
+                                      values.begin(), first);
             for (auto it = first; it != values.end(); ++it)
                 if (!omitted.count(it->first))
                     result.smallValues_->push_back(*it);

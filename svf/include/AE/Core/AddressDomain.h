@@ -95,7 +95,7 @@ class FiniteLocationSet
     {
         std::size_t operator()(Location location) const noexcept
         {
-            return std::hash<std::uint32_t>{}(location.id());
+            return std::hash<std::uint32_t> {}(location.id());
         }
     };
     using Hash = std::unordered_set<Location, LocationHash>;
@@ -119,7 +119,10 @@ public:
         explicit const_iterator(Hash::const_iterator it) : position_(it) {}
 
         reference operator*() const;
-        pointer operator->() const { return &**this; }
+        pointer operator->() const
+        {
+            return &**this;
+        }
         const_iterator& operator++();
         const_iterator operator++(int);
         friend bool operator==(const const_iterator& lhs, const const_iterator& rhs)
@@ -145,9 +148,15 @@ public:
     FiniteLocationSet& operator=(const FiniteLocationSet& other);
     FiniteLocationSet& operator=(FiniteLocationSet&& other) noexcept;
 
-    AddressSetStorage storage() const { return storage_; }
+    AddressSetStorage storage() const
+    {
+        return storage_;
+    }
     std::size_t size() const;
-    bool empty() const { return size() == 0; }
+    bool empty() const
+    {
+        return size() == 0;
+    }
     bool contains(Location location) const;
     const_iterator begin() const;
     const_iterator end() const;
@@ -257,7 +266,10 @@ public:
     static AddressDomain bottom(AddressSetStorage storage =
                                     AddressSetStorage::OneWithSharedOverflow);
 
-    AddressSetStorage setStorage() const { return storage_; }
+    AddressSetStorage setStorage() const
+    {
+        return storage_;
+    }
     AddressDomain without(const std::set<Variable>& omitted) const;
 
     DomainKind kind() const noexcept override

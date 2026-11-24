@@ -1187,8 +1187,14 @@ public:
         noSignedWrap = signedWrap;
         noUnsignedWrap = unsignedWrap;
     }
-    bool hasNoSignedWrap() const { return noSignedWrap; }
-    bool hasNoUnsignedWrap() const { return noUnsignedWrap; }
+    bool hasNoSignedWrap() const
+    {
+        return noSignedWrap;
+    }
+    bool hasNoUnsignedWrap() const
+    {
+        return noUnsignedWrap;
+    }
 
     virtual const std::string toString() const override;
 

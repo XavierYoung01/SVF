@@ -693,7 +693,7 @@ private:
                                         IntegerLiteral literal = {})
     {
         SVFVar* node = new ConstIntValVar(i, intValue.first, intValue.second,
-                                         icfgNode, type, std::move(literal));
+                                          icfgNode, type, std::move(literal));
         return addNode(node);
     }
 
@@ -759,7 +759,7 @@ private:
                                         const ICFGNode* node, IntegerLiteral literal = {})
     {
         ConstIntObjVar* conObj = new ConstIntObjVar(i, intValue.first, intValue.second,
-                                                  ti, node, std::move(literal));
+            ti, node, std::move(literal));
         return addBaseObjNode(conObj);
     }
 

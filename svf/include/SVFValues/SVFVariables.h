@@ -1569,7 +1569,10 @@ public:
     }
     //@}
 
-    const IntegerLiteral& getIntegerLiteral() const { return literal; }
+    const IntegerLiteral& getIntegerLiteral() const
+    {
+        return literal;
+    }
 
     s64_t getSExtValue() const
     {
@@ -1845,7 +1848,10 @@ public:
         return node->getNodeKind() == SVFVar::ConstIntObjNode;
     }
 
-    const IntegerLiteral& getIntegerLiteral() const { return literal; }
+    const IntegerLiteral& getIntegerLiteral() const
+    {
+        return literal;
+    }
 
     s64_t getSExtValue() const
     {

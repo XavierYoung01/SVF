@@ -101,8 +101,14 @@ public:
     }
     //@}
 
-    unsigned getIndexBitWidth() const { return indexBitWidth; }
-    void setIndexBitWidth(unsigned width) { indexBitWidth = width; }
+    unsigned getIndexBitWidth() const
+    {
+        return indexBitWidth;
+    }
+    void setIndexBitWidth(unsigned width)
+    {
+        indexBitWidth = width;
+    }
 
     /// Get methods
     //@{

@@ -912,7 +912,7 @@ public:
         const Interval intervalA = Interval::closed(Rational(1), Rational(3));
         const Interval intervalB = Interval::closed(Rational(2), Rational(7));
         BoxAddressDomain state(BoxDomain::top(), MemoryLayout({{cellA, contentA},
-                                                              {cellB, contentB}}));
+            {cellB, contentB}}));
         state.setInterval(sourceA, intervalA);
         state.setInterval(sourceB, intervalB);
         state.setAddressSet(pointerA, AddressSet::singleton(cellA));

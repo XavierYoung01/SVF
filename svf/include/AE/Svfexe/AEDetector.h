@@ -253,21 +253,21 @@ public:
         const auto value = [](const Bound& bound) -> BoundedInt
         {
             if (bound.isMinusInfinity())
-                return BoundedInt::minus_infinity();
+            return BoundedInt::minus_infinity();
             if (bound.isPlusInfinity())
                 return BoundedInt::plus_infinity();
-            const Rational& endpoint = bound.value();
-            const Rational integer = endpoint.sign() < 0 ? endpoint.ceil() : endpoint.floor();
-            std::int64_t result;
-            if (integer.tryToInt64(result))
-                return result;
-            return endpoint.sign() < 0 ? BoundedInt::minus_infinity()
-                                       : BoundedInt::plus_infinity();
-        };
-        recoder.addAbsExecBug(GenericBug::FULLBUFOVERFLOW, eventStack,
-                              value(info.bufferSize.lower()), value(info.bufferSize.upper()),
-                              value(info.accessOffset.lower()),
-                              value(info.accessOffset.upper()));
+                const Rational& endpoint = bound.value();
+                const Rational integer = endpoint.sign() < 0 ? endpoint.ceil() : endpoint.floor();
+                std::int64_t result;
+                if (integer.tryToInt64(result))
+                    return result;
+                    return endpoint.sign() < 0 ? BoundedInt::minus_infinity()
+                                   : BoundedInt::plus_infinity();
+                };
+    recoder.addAbsExecBug(GenericBug::FULLBUFOVERFLOW, eventStack,
+                          value(info.bufferSize.lower()), value(info.bufferSize.upper()),
+                          value(info.accessOffset.lower()),
+                          value(info.accessOffset.upper()));
         nodeToBugInfo[node] = stmt ? stmt->toString() : node->toString();
     }
 

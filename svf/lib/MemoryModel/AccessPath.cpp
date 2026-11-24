@@ -73,12 +73,12 @@ std::optional<APOffset> AccessPath::constantIndex(const ValVar* variable) const
     const auto& literal = constant->getIntegerLiteral();
     if (!indexBitWidth || indexBitWidth >= literal.bitWidth)
         return literal.fitsSigned64 ? std::optional<APOffset>(constant->getSExtValue())
-                                   : std::nullopt;
+               : std::nullopt;
     if (indexBitWidth > 64)
         return std::nullopt;
 
     auto bits = literal.wideWords.empty() ? std::uint64_t(constant->getZExtValue())
-                                         : literal.wideWords.front();
+                : literal.wideWords.front();
     if (indexBitWidth < 64)
     {
         const auto modulus = std::uint64_t{1} << indexBitWidth;
@@ -89,7 +89,7 @@ std::optional<APOffset> AccessPath::constantIndex(const ValVar* variable) const
     }
     constexpr auto signBit = std::uint64_t{1} << 63;
     return bits < signBit ? static_cast<APOffset>(bits)
-                          : -1 - static_cast<APOffset>(~bits);
+           : -1 - static_cast<APOffset>(~bits);
 }
 
 /// Return true if all offsets can be interpreted as machine indices.
