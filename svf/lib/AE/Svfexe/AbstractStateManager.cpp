@@ -31,7 +31,7 @@
 
 #include "AE/Svfexe/AbstractInterpretation.h"
 
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/Options.h"
 
 #include <cassert>
@@ -233,8 +233,7 @@ SVF::Interval AbstractInterpretation::getGepByteOffset(const GepStmt* gep)
 SVF::AddressSet AbstractInterpretation::getGepObjAddrs(
     const ValVar* pointer, const SVF::Interval& offset, const ICFGNode* node)
 {
-    const ICFGNode* definition = pointer->getICFGNode();
-    const SVF::AddressSet bases = getAddressSet(pointer, definition);
+    const SVF::AddressSet bases = getAddressSet(pointer, node);
     SVF::AddressSet result = SVF::AddressSet::bottom();
     if (offset.isBottom() || !bases.isFinite())
         return result;
@@ -253,7 +252,7 @@ SVF::AddressSet AbstractInterpretation::getGepObjAddrs(
             if (!object || svfir->isNullOrBlkObj(object->getId()))
                 continue;
             const ObjVar* base = object;
-            if (isFreedMemory(location, definition))
+            if (isFreedMemory(location, node))
                 base = SVFUtil::cast<ObjVar>(svfir->getGNode(svfir->getBlackHoleNode()));
             const NodeID field = svfir->getGepObjVar(base->getId(), index);
             result.insert(locationOf(SVFUtil::cast<ObjVar>(svfir->getGNode(field))));
@@ -485,7 +484,7 @@ SVF::Interval AbstractInterpretation::getDefinedInterval(const ValVar* var,
     SVF::Interval constant;
     if (constantInterval(var, constant))
         return constant;
-    // SVFIR also uses its canonical unknown pointer as the numeric source of
+    // PAG also uses its canonical unknown pointer as the numeric source of
     // nondeterministic external-input stores (STORE_TOP annotations).
     if (var->getId() == svfir->getBlkPtr() ||
             SVFUtil::isa<BlackHoleValVar>(var))
@@ -532,7 +531,7 @@ SVF::Interval AbstractInterpretation::getInterval(const SVFVar* var,
 SVF::AddressSet AbstractInterpretation::getAddressSet(const ValVar* var,
         const ICFGNode* node)
 {
-    if (var->getId() == IRGraph::NullPtr ||
+    if (var->getId() == PAGBase::NullPtr ||
             SVFUtil::isa<ConstNullPtrValVar>(var))
         return SVF::AddressSet::singleton(SVF::Location::null());
     if (var->getId() == svfir->getBlkPtr() ||

@@ -30,7 +30,7 @@
 #include "AE/Svfexe/AbsExtAPI.h"
 #include "AE/Svfexe/SparseAbstractInterpretation.h"
 #include "Graphs/CallGraph.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/Options.h"
 #include "Util/WorkList.h"
 #include "WPA/Andersen.h"
@@ -46,10 +46,10 @@ using namespace SVFUtil;
 SVF::AddressSet AbstractInterpretation::blackHoleAddressSet() const
 {
     const auto* object = SVFUtil::dyn_cast<ObjVar>(
-                             svfir->getGNode(IRGraph::BlackHole));
+                             svfir->getGNode(PAGBase::BlackHole));
     if (!object)
     {
-        assert(false && "SVFIR has no BlackHole object");
+        assert(false && "PAG has no BlackHole object");
         std::abort();
     }
     return SVF::AddressSet::singleton(adapter_.location(*object));
@@ -518,7 +518,7 @@ bool AbstractInterpretation::collectSwitchRefinement(
     if (!targets.isSingleton() || targets.hasUnknownObject())
         return true;
     const ObjVar* object = objectAt(*targets.begin());
-    if (object && object->getId() != IRGraph::NullPtr && object->getId() != IRGraph::BlackHole)
+    if (object && object->getId() != PAGBase::NullPtr && object->getId() != PAGBase::BlackHole)
         return recordBranchRefinement(object->getId(),
                                SVF::Interval::singleton(SVF::Rational(caseValue)), state,
                                load->getICFGNode(), edge->getDstNode());
@@ -546,8 +546,8 @@ bool AbstractInterpretation::collectBranchRefinement(
     if (cmpStmt)
     {
         s32_t predicate = cmpStmt->getPredicate();
-        if (cmpStmt->getOpVarID(0) == IRGraph::NullPtr ||
-                cmpStmt->getOpVarID(1) == IRGraph::NullPtr)
+        if (cmpStmt->getOpVarID(0) == PAGBase::NullPtr ||
+                cmpStmt->getOpVarID(1) == PAGBase::NullPtr)
         {
             // p == NULL / p != NULL: no interval obj to refine.
         }
@@ -716,17 +716,100 @@ void AbstractInterpretation::handleFunction(const ICFGNode* funEntry, const Call
     {
         const ICFGWTOComp* comp = worklist.pop();
 
-        if (const ICFGSingletonWTO* singleton = SVFUtil::dyn_cast<ICFGSingletonWTO>(comp))
+        if (!isInputCoveredByPreIteration(comp))
+            handleWTOComponent(comp, caller);
+    }
+}
+
+std::optional<AbstractInterpretation::ComponentInput>
+AbstractInterpretation::probeComponentInput(const ICFGNode* node)
+{
+    std::optional<State> output;
+    const auto previous = abstractTrace_.find(node);
+    if (previous != abstractTrace_.end())
+        output = previous->second;
+
+    std::optional<NodeBS> previousDefinitions;
+    const auto definition = definedValues_.find(node);
+    if (definition != definedValues_.end())
+        previousDefinitions = definition->second;
+
+    std::optional<ComponentInput> input;
+    if (mergeStatesFromPredecessors(node))
+    {
+        const auto current = definedValues_.find(node);
+        input = ComponentInput{state(node),
+            current == definedValues_.end() ? NodeBS{} : current->second, {}};
+    }
+
+    if (previousDefinitions)
+        definedValues_.insert_or_assign(node, std::move(*previousDefinitions));
+    else
+        definedValues_.erase(node);
+
+    if (output)
+        abstractTrace_.insert_or_assign(node, std::move(*output));
+    else
+        abstractTrace_.erase(node);
+    return input;
+}
+
+bool AbstractInterpretation::isInputCoveredByPreIteration(const ICFGWTOComp* comp)
+{
+    const auto* singleton = SVFUtil::dyn_cast<ICFGSingletonWTO>(comp);
+    const ICFGNode* head = singleton ? singleton->getICFGNode()
+        : SVFUtil::cast<ICFGCycleWTO>(comp)->head()->getICFGNode();
+    auto input = probeComponentInput(head);
+    if (!input)
+        return false;
+
+    collectComponentScalarInputs(head, input->state);
+    if (!singleton)
+    {
+        Set<const ICFGNode*> visited{head};
+        std::vector<const ICFGWTOComp*> pending{comp};
+        while (!pending.empty())
         {
-            const ICFGNode* node = singleton->getICFGNode();
-            if (mergeStatesFromPredecessors(node))
-                handleICFGNode(node);
+            const ICFGWTOComp* next = pending.back();
+            pending.pop_back();
+            const auto* bodyNode = SVFUtil::dyn_cast<ICFGSingletonWTO>(next);
+            const ICFGNode* node = nullptr;
+            if (bodyNode)
+                node = bodyNode->getICFGNode();
+            else
+            {
+                const auto* cycle = SVFUtil::cast<ICFGCycleWTO>(next);
+                node = cycle->head()->getICFGNode();
+                for (const auto* child : cycle->getWTOComponents())
+                    pending.push_back(child);
+            }
+            if (visited.insert(node).second)
+                collectComponentScalarInputs(node, input->state);
         }
-        else if (const ICFGCycleWTO* cycle = SVFUtil::dyn_cast<ICFGCycleWTO>(comp))
-        {
-            if (mergeStatesFromPredecessors(cycle->head()->getICFGNode()))
-                handleLoopOrRecursion(cycle, caller);
-        }
+    }
+    const auto previous = preIterationInputs_.find(head);
+    if (previous != preIterationInputs_.end() &&
+            input->definedValues == previous->second.definedValues &&
+            input->memorySupport == previous->second.memorySupport &&
+            input->state.isSubsetOf(previous->second.state) == CheckResult::True)
+        return true;
+    preIterationInputs_.insert_or_assign(head, std::move(*input));
+    return false;
+}
+
+void AbstractInterpretation::handleWTOComponent(const ICFGWTOComp* comp,
+        const CallICFGNode* caller)
+{
+    if (const ICFGSingletonWTO* singleton = SVFUtil::dyn_cast<ICFGSingletonWTO>(comp))
+    {
+        const ICFGNode* node = singleton->getICFGNode();
+        if (mergeStatesFromPredecessors(node))
+            handleICFGNode(node);
+    }
+    else if (const ICFGCycleWTO* cycle = SVFUtil::dyn_cast<ICFGCycleWTO>(comp))
+    {
+        if (mergeStatesFromPredecessors(cycle->head()->getICFGNode()))
+            handleLoopOrRecursion(cycle, caller);
     }
 }
 
@@ -822,7 +905,8 @@ void AbstractInterpretation::handleFunCall(const CallICFGNode *callNode)
         const auto& callees = callGraph->getIndCSCallees(callNode);
         for (const FunObjVar* callee : callees)
         {
-            if (callee->isDeclaration())
+            if (callee->isDeclaration() ||
+                    (isRecursiveFun(callee) && isRecursiveCallSite(callNode, callee)))
                 continue;
             const ICFGNode* calleeEntry = icfg->getFunEntryICFGNode(callee);
             handleFunction(calleeEntry, callNode);
@@ -1137,7 +1221,9 @@ void AbstractInterpretation::updateStateOnCmp(const CmpStmt* cmp)
     SVF::Interval rhsInterval = getInterval(cmp->getOpVar(1), node);
     const SVF::AddressSet lhsAddresses = getAddressSet(cmp->getOpVar(0), node);
     const SVF::AddressSet rhsAddresses = getAddressSet(cmp->getOpVar(1), node);
-    const bool addressComparison = cmp->getOpVar(0)->isPointer();
+    // Undef and poison use the pointer-typed BlkPtr regardless of operand type.
+    const unsigned typedOperand = cmp->getOpVar(0)->getId() == svfir->getBlkPtr() ? 1 : 0;
+    const bool addressComparison = cmp->getOpVar(typedOperand)->isPointer();
     SVF::Interval result =
         SVF::Interval::closed(SVF::Rational(0), SVF::Rational(1));
     const auto boolean = [](bool value)

@@ -22,7 +22,7 @@
 
 #include "AE/Svfexe/AEStat.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 
 using namespace SVF;
 using namespace SVFUtil;

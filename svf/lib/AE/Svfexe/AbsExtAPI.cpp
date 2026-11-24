@@ -30,7 +30,7 @@
 
 #include <cmath>
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/Options.h"
 
 #include <algorithm>
@@ -241,16 +241,8 @@ void AbsExtAPI::initExtFunMap()
     {
         assert(callNode->arg_size() >= 1 && "strlen expects one argument");
         const SVFVar* retVar = callNode->getRetICFGNode()->getActualRet();
-        SVF::Interval byteLen = getStrlen(callNode->getArgument(0), callNode);
-        u32_t elemSize = getElementSize(callNode->getArgument(0));
-        if (byteLen.isSingleton() && elemSize > 1)
-            ae->updateInterval(
-                retVar,
-                integerInterval(byteLen.singletonValue().toInt64() /
-                                static_cast<s64_t>(elemSize)),
-                callNode);
-        else
-            ae->updateInterval(retVar, byteLen, callNode);
+        ae->updateInterval(retVar, getStrlen(callNode->getArgument(0), callNode),
+                           callNode);
     };
     func_map["strlen"] = sse_strlen;
     func_map["wcslen"] = sse_strlen;
@@ -479,101 +471,197 @@ bool AbsExtAPI::isValidLength(const SVF::Interval& len)
     return !len.isBottom() && len.lower().isFinite();
 }
 
-/// Calculate the length of a null-terminated string in abstract state.
-/// Scans memory from the base of strValue looking for a '\0' byte.
-SVF::Interval AbsExtAPI::getStrlen(const ValVar* strValue, const ICFGNode* node)
+u32_t AbsExtAPI::getStringElementSize(const ValVar* var, const ICFGNode* node)
 {
-    // Step 1: determine the buffer size (in bytes) backing this pointer
-    u32_t dst_size = 0;
-    const SVF::AddressSet ptrVal = ae->getAddressSet(strValue, node);
-    if (!ptrVal.hasUnknownObject())
-        for (SVF::Location location : ptrVal)
-        {
-            const ObjVar* object = ae->objectAt(location);
-            const BaseObjVar* baseObject =
-                object ? svfir->getBaseObject(object->getId()) : nullptr;
-            // Abstract addresses may denote black-hole, integer-derived, or
-            // other non-object nodes.  In that case the backing size is
-            // unknown; keep the conservative unknown-length result instead of
-            // dereferencing a missing BaseObjVar.
-            if (baseObject == nullptr)
-                continue;
-            if (baseObject->isConstantByteSize())
-            {
-                dst_size = baseObject->getByteSizeOfObj();
-            }
-            else
-            {
-                const ICFGNode* icfgNode = baseObject->getICFGNode();
-                if (icfgNode == nullptr)
-                    continue;
-                for (const SVFStmt* stmt2 : icfgNode->getSVFStmts())
-                {
-                    if (const AddrStmt* addrStmt =
-                                SVFUtil::dyn_cast<AddrStmt>(stmt2))
-                    {
-                        dst_size = ae->getAllocaInstByteSize(addrStmt).upperBound;
-                    }
-                }
-            }
-        }
-
-    u32_t len = 0;
-    for (u32_t index = 0; index < dst_size; ++index)
+    const AddressSet targets = ae->getAddressSet(var, node);
+    if (!targets.isFinite() || targets.empty())
+        return 0;
+    u32_t width = 0;
+    for (Location target : targets)
     {
-        const SVF::AddressSet locations = ae->getGepObjAddrs(strValue, integerInterval(index), node);
-        SVF::Interval value = SVF::Interval::bottom();
-        if (locations.isFinite())
-            for (SVF::Location location : locations)
-                value.joinWith(ae->getMemoryInterval(location, node));
-        if (value.isSingleton() && static_cast<char>(lowerInteger(value)) == 0)
-            break;
-        ++len;
+        const ObjVar* object = ae->objectAt(target);
+        if (!object || svfir->isNullOrBlkObj(object->getId()) ||
+                ae->isFreedMemory(target, node))
+            return 0;
+        const SVFType* type = svfir->getBaseObject(object->getId())->getType();
+        while (const auto* array = SVFUtil::dyn_cast<SVFArrayType>(type))
+            type = array->getTypeOfElement();
+        if (!SVFUtil::isa<SVFIntegerType>(type) || !type->getByteSize() ||
+                (width && width != type->getByteSize()))
+            return 0;
+        width = type->getByteSize();
     }
-    return len == 0 ? SVF::Interval::closed(SVF::Rational(0), SVF::Rational(Options::MaxFieldLimit()))
-           : integerInterval(len * getElementSize(strValue));
+    return width;
 }
 
-// ===----------------------------------------------------------------------===//
-//  String/memory operation handlers
-// ===----------------------------------------------------------------------===//
+Location AbsExtAPI::getStringField(const ObjVar& object, u32_t index)
+{
+    const auto* base = svfir->getBaseObject(object.getId());
+    const auto* gep = SVFUtil::dyn_cast<GepObjVar>(&object);
+    const APOffset offset = (gep ? gep->getConstantFieldIdx() : 0) + index;
+    if (offset < 0 || offset >= base->getNumOfElements() ||
+            offset >= base->getMaxFieldOffsetLimit() || offset >= Options::MaxFieldLimit())
+        return Location::null();
+    const NodeID field = svfir->getGepObjVar(object.getId(), index);
+    return ae->locationOf(SVFUtil::cast<ObjVar>(svfir->getSVFVar(field)));
+}
 
-/// strcpy(dst, src): copy all of src (including '\0') into dst.
-/// Covers: strcpy, __strcpy_chk, stpcpy, wcscpy, __wcscpy_chk
+Interval AbsExtAPI::getStringLastByte(const CallICFGNode* call,
+                                     const Interval& length)
+{
+    Interval width = integerInterval(1);
+    if (call->getCalledFunction()->getName().find("wcs") != std::string::npos)
+    {
+        const auto dst = getStringElementSize(call->getArgument(0), call);
+        const auto src = getStringElementSize(call->getArgument(1), call);
+        if ((dst > 1 || src > 1) && (dst <= 1 || src <= 1 || dst == src))
+            width = integerInterval(dst > 1 ? dst : src);
+        else
+            width = Interval(Bound::finite(Rational(1)), Bound::plusInfinity());
+    }
+    return subtract(multiply(add(length, integerInterval(1)), width), integerInterval(1));
+}
+
+Interval AbsExtAPI::getStrlen(const ValVar* var, const ICFGNode* node)
+{
+    const Interval unknown(Bound::finite(Rational(0)), Bound::plusInfinity());
+    const AddressSet targets = ae->getAddressSet(var, node);
+    const auto* call = SVFUtil::dyn_cast<CallICFGNode>(node);
+    if (call && call->getCalledFunction() &&
+            call->getCalledFunction()->getName().find("wcs") == std::string::npos &&
+            getStringElementSize(var, node) != 1)
+        return unknown;
+    if (!targets.isFinite() || targets.empty())
+        return unknown;
+
+    Interval result = Interval::bottom();
+    for (Location target : targets)
+    {
+        const ObjVar* object = ae->objectAt(target);
+        if (!object || svfir->isNullOrBlkObj(object->getId()) ||
+                ae->isFreedMemory(target, node))
+        {
+            result.joinWith(unknown);
+            continue;
+        }
+        u32_t lower = 0;
+        bool nonzeroPrefix = true;
+        Interval length = unknown;
+        for (u32_t index = 0; index < Options::MaxFieldLimit(); ++index)
+        {
+            const Location field = getStringField(*object, index);
+            if (field.isNull())
+                break;
+            const Interval value = ae->getMemoryInterval(field, node);
+            const AddressSet addresses = ae->getMemoryAddressSet(field, node);
+            const bool numeric = addresses.isBottom() || addresses.empty();
+            if (numeric && value.isZero())
+            {
+                length = Interval::closed(Rational(lower), Rational(index));
+                break;
+            }
+            if (!numeric || value.isBottom() || value.contains(Rational(0)))
+                nonzeroPrefix = false;
+            if (nonzeroPrefix)
+                ++lower;
+            length = Interval(Bound::finite(Rational(lower)), Bound::plusInfinity());
+        }
+        result.joinWith(length);
+    }
+    return result;
+}
+
 void AbsExtAPI::handleStrcpy(const CallICFGNode* call)
 {
-    const ValVar* dst = call->getArgument(0);
-    const ValVar* src = call->getArgument(1);
-    SVF::Interval srcLen = getStrlen(src, call);
-    if (!isValidLength(srcLen))
-        return;
-    handleMemcpy(dst, src, srcLen, 0, call);
+    handleStringCopy(call, getStrlen(call->getArgument(1), call), integerInterval(0));
 }
 
-/// strcat(dst, src): append all of src after the end of dst.
-/// Covers: strcat, __strcat_chk, wcscat, __wcscat_chk
 void AbsExtAPI::handleStrcat(const CallICFGNode* call)
 {
-    const ValVar* dst = call->getArgument(0);
-    const ValVar* src = call->getArgument(1);
-    SVF::Interval dstLen = getStrlen(dst, call);
-    SVF::Interval srcLen = getStrlen(src, call);
-    if (!isValidLength(dstLen))
-        return;
-    handleMemcpy(dst, src, srcLen, lowerInteger(dstLen), call);
+    handleStringCopy(call, getStrlen(call->getArgument(1), call),
+                     getStrlen(call->getArgument(0), call));
 }
 
-/// strncat(dst, src, n): append at most n bytes of src after the end of dst.
-/// Covers: strncat, __strncat_chk, wcsncat, __wcsncat_chk
 void AbsExtAPI::handleStrncat(const CallICFGNode* call)
 {
-    const ValVar* dst = call->getArgument(0);
-    const ValVar* src = call->getArgument(1);
-    SVF::Interval n = ae->getInterval(call->getArgument(2), call);
-    SVF::Interval dstLen = getStrlen(dst, call);
-    if (!isValidLength(dstLen))
-        return;
-    handleMemcpy(dst, src, n, lowerInteger(dstLen), call);
+    handleStringCopy(call, getStrncatLength(call), getStrlen(call->getArgument(0), call));
+}
+
+Interval AbsExtAPI::getStrncatLength(const CallICFGNode* call)
+{
+    const Interval limit = ae->getInterval(call->getArgument(2), call);
+    if (limit.isBottom() || !limit.lower().isFinite() ||
+            limit.lower().value() < Rational(0))
+        return Interval(Bound::finite(Rational(0)), Bound::plusInfinity());
+    const Interval source = getStrlen(call->getArgument(1), call);
+    return Interval(Bound::min(limit.lower(), source.lower()),
+                    Bound::min(limit.upper(), source.upper()));
+}
+
+void AbsExtAPI::handleStringCopy(const CallICFGNode* call,
+                                const Interval& length, const Interval& start)
+{
+    const auto* src = call->getArgument(1);
+    const AddressSet targets = ae->getAddressSet(call->getArgument(0), call);
+    const bool precise = length.isSingleton() && start.isSingleton();
+    const auto fieldLimit = static_cast<s64_t>(Options::MaxFieldLimit());
+    const bool weak = !targets.isFinite() || targets.size() != 1;
+    const auto minimumStart = lowerInteger(start);
+    for (u32_t index = 0; index < fieldLimit; ++index)
+    {
+        Interval value = Interval::top();
+        auto destination = static_cast<s64_t>(index);
+        if (precise)
+        {
+            if (length.singletonValue() < Rational(index) ||
+                    minimumStart >= fieldLimit - index)
+                break;
+            destination += minimumStart;
+            if (length.singletonValue() == Rational(index))
+                value = integerInterval(0);
+            else
+            {
+                value = Interval::bottom();
+                const AddressSet sources = ae->getGepObjAddrs(src, integerInterval(index), call);
+                for (Location source : sources)
+                {
+                    const AddressSet addresses = ae->getMemoryAddressSet(source, call);
+                    if (!addresses.isBottom() && !addresses.empty())
+                        value.joinWith(Interval::top());
+                    else
+                        value.joinWith(ae->getMemoryInterval(source, call));
+                }
+                if (value.isBottom())
+                    value = Interval::top();
+            }
+        }
+        else if (index < minimumStart)
+            continue;
+
+        for (Location target : targets)
+        {
+            const ObjVar* object = ae->objectAt(target);
+            if (!object || svfir->isNullOrBlkObj(object->getId()) ||
+                    ae->isFreedMemory(target, call))
+                continue;
+            const Location field = getStringField(*object, destination);
+            if (field.isNull())
+                continue;
+            Interval stored = value;
+            AddressSet addresses = AddressSet::bottom();
+            if (weak)
+            {
+                if (ae->hasMemoryValue(field, call))
+                {
+                    stored.joinWith(ae->getMemoryInterval(field, call));
+                    addresses = ae->getMemoryAddressSet(field, call);
+                }
+                else
+                    stored = Interval::top();
+            }
+            ae->updateMemoryValue(field, stored, addresses, call);
+        }
+    }
 }
 
 /// Copy the bounded number of fields used by the external model.

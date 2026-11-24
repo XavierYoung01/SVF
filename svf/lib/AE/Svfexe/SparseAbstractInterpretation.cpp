@@ -25,7 +25,7 @@
 #include "Graphs/SVFG.h"
 #include "Graphs/SparseObjGraph.h"
 #include "MSSA/SVFGBuilder.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/Options.h"
 
 #include <algorithm>
@@ -157,6 +157,35 @@ bool SemiSparseAbstractInterpretation::mergeStatesFromPredecessors(const ICFGNod
     return hasFeasiblePredecessor;
 }
 
+void SemiSparseAbstractInterpretation::collectComponentScalarInputs(
+    const ICFGNode* node, State& input)
+{
+    const auto copyValue = [&](const SVFVar* operand)
+    {
+        const auto* var = SVFUtil::dyn_cast<ValVar>(operand);
+        if (var && adapter_.contains(*var) && getICFGNode(var) != node &&
+                hasAbsValue(var, node))
+        {
+            const Variable key = adapter_.variable(*var);
+            input.assignValueFrom(key, state(getICFGNode(var)), key);
+        }
+    };
+    for (const SVFStmt* statement : node->getSVFStmts())
+    {
+        if (const auto* branch = SVFUtil::dyn_cast<BranchStmt>(statement))
+            copyValue(branch->getCondition());
+        else if (const auto* multi = SVFUtil::dyn_cast<MultiOpndStmt>(statement))
+            for (u32_t index = 0; index < multi->getOpVarNum(); ++index)
+                copyValue(multi->getOpVar(index));
+        else
+            copyValue(statement->getSrcNode());
+
+        if (const auto* gep = SVFUtil::dyn_cast<GepStmt>(statement))
+            for (const auto& offset : gep->getOffsetVarAndGepTypePairVec())
+                copyValue(offset.first);
+    }
+}
+
 std::unique_ptr<SVF::AbstractDomain>
 SemiSparseAbstractInterpretation::cloneCycleHeadState(const ICFGCycleWTO* cycle)
 {
@@ -203,10 +232,10 @@ bool SemiSparseAbstractInterpretation::narrowCycleState(const SVF::AbstractDomai
 
 FullSparseAbstractInterpretation::FullSparseAbstractInterpretation()
 {
-    svfgBuilder_ = std::make_unique<SVFGBuilder>(true);
-    svfgBuilder_->buildFullSVFG(preAnalysis->getPointerAnalysis());
+    SVFGBuilder builder(true);
+    builder.buildFullSVFG(preAnalysis->getPointerAnalysis());
     objRoutes_ = std::make_unique<SparseObjGraph>(
-        *svfgBuilder_->getSVFG(), *icfg, *preAnalysis->getPointerAnalysis(),
+        *builder.getSVFG(), *icfg, *preAnalysis->getPointerAnalysis(),
         *svfir);
 }
 
@@ -245,6 +274,24 @@ void FullSparseAbstractInterpretation::storeValue(const ValVar* pointer,
     else
         for (Location location : targets)
             record(location);
+}
+
+std::optional<FullSparseAbstractInterpretation::ComponentInput>
+FullSparseAbstractInterpretation::probeComponentInput(const ICFGNode* node)
+{
+    const auto oldSupport = memoryDefinitionSupport_.find(node);
+    std::optional<std::set<Variable>> support;
+    if (oldSupport != memoryDefinitionSupport_.end())
+        support = oldSupport->second;
+    auto input = Base::probeComponentInput(node);
+    const auto current = memoryDefinitionSupport_.find(node);
+    if (input && current != memoryDefinitionSupport_.end())
+        input->memorySupport = std::move(current->second);
+    if (support)
+        memoryDefinitionSupport_.insert_or_assign(node, std::move(*support));
+    else
+        memoryDefinitionSupport_.erase(node);
+    return input;
 }
 
 bool FullSparseAbstractInterpretation::mergeStatesFromPredecessors(
@@ -287,8 +334,8 @@ bool FullSparseAbstractInterpretation::mergeStatesFromPredecessors(
         }
         const auto& support =
             source == node ? previousSupport : memoryDefinitionSupport_[source];
-        for (NodeID id :
-             svfir->getAllFieldsObjVars(svfir->getBaseObject(sourceNode->base)))
+        for (NodeID base : edge->getBases())
+        for (NodeID id : svfir->getAllFieldsObjVars(svfir->getBaseObject(base)))
         {
             const auto* object =
                 SVFUtil::dyn_cast<ObjVar>(svfir->getSVFVar(id));

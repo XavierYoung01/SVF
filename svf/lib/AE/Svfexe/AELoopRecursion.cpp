@@ -32,7 +32,7 @@
 
 #include "AE/Svfexe/AEWTO.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/Options.h"
 #include "WPA/Andersen.h"
 #include <cstdlib>
@@ -261,56 +261,31 @@ void AbstractInterpretation::handleLoopOrRecursion(const ICFGCycleWTO* cycle, co
         return;
     }
 
-    // Iterate until fixpoint with widening/narrowing on the cycle head.
     bool increasing = true;
-    u32_t widen_delay = Options::WidenDelay();
-    for (u32_t cur_iter = 0;; cur_iter++)
+    const u32_t widenDelay = Options::WidenDelay();
+    std::unique_ptr<SVF::AbstractDomain> previous;
+    for (u32_t iteration = 0;; ++iteration)
     {
-        if (cur_iter >= widen_delay)
+        if (mergeStatesFromPredecessors(cycle_head))
+            handleICFGNode(cycle_head);
+
+        auto current = cloneCycleHeadState(cycle);
+        if (!previous || iteration < widenDelay)
+            previous = std::move(current);
+        else if (increasing)
         {
-            // getFullCycleHeadState handles dense (returns trace[cycle_head])
-            // and semi-sparse (collects ValVars from def-sites) uniformly.
-            auto prev = cloneCycleHeadState(cycle);
-
-            if (mergeStatesFromPredecessors(cycle_head))
-                handleICFGNode(cycle_head);
-            auto cur = cloneCycleHeadState(cycle);
-
-            if (increasing)
-            {
-                if (widenCycleState(*prev, *cur, cycle))
-                {
-                    increasing = false;
-                    continue;
-                }
-            }
-            else
-            {
-                if (narrowCycleState(*prev, *cur, cycle))
-                    break;
-            }
+            if (widenCycleState(*previous, *current, cycle))
+                increasing = false;
+            previous = cloneCycleHeadState(cycle);
         }
         else
         {
-            // Before widen_delay: process cycle head with gated pattern
-            if (mergeStatesFromPredecessors(cycle_head))
-                handleICFGNode(cycle_head);
+            if (narrowCycleState(*previous, *current, cycle))
+                break;
+            previous = cloneCycleHeadState(cycle);
         }
 
-        // Process cycle body components (each with gated merge+handle)
         for (const ICFGWTOComp* comp : cycle->getWTOComponents())
-        {
-            if (const ICFGSingletonWTO* singleton = SVFUtil::dyn_cast<ICFGSingletonWTO>(comp))
-            {
-                const ICFGNode* node = singleton->getICFGNode();
-                if (mergeStatesFromPredecessors(node))
-                    handleICFGNode(node);
-            }
-            else if (const ICFGCycleWTO* subCycle = SVFUtil::dyn_cast<ICFGCycleWTO>(comp))
-            {
-                if (mergeStatesFromPredecessors(subCycle->head()->getICFGNode()))
-                    handleLoopOrRecursion(subCycle, caller);
-            }
-        }
+            handleWTOComponent(comp, caller);
     }
 }

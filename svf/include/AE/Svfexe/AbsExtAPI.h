@@ -28,8 +28,9 @@
 
 #include <functional>
 
+#include "AE/Core/AddressDomain.h"
 #include "AE/Core/NumericalDomain.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/GeneralType.h"
 
 namespace SVF
@@ -104,6 +105,8 @@ public:
     SVF::Interval getStrlen(const ValVar* strValue,
                             const ICFGNode* node);
 
+    Interval getStringLastByte(const CallICFGNode* call, const Interval& length);
+
     // --- String/memory operation handlers ---
 
     void handleStrcpy(const CallICFGNode* call);
@@ -129,10 +132,17 @@ public:
 
     Set<const CallICFGNode*> checkpoints; // for CI check
 
+private:
+    u32_t getStringElementSize(const ValVar* var, const ICFGNode* node);
+    Location getStringField(const ObjVar& object, u32_t index);
+    Interval getStrncatLength(const CallICFGNode* call);
+    void handleStringCopy(const CallICFGNode* call, const Interval& length,
+                          const Interval& start);
+
 protected:
     AbstractInterpretation*
     ae;       ///< Owning AbstractInterpretation; provides state access.
-    SVFIR* svfir; ///< Pointer to the SVF intermediate representation.
+    PAG* svfir; ///< Pointer to the SVF intermediate representation.
     ICFG* icfg;   ///< Pointer to the interprocedural control flow graph.
     Map<std::string, std::function<void(const CallICFGNode*)>>
     func_map; ///< Map of function names to handlers.

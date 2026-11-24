@@ -67,6 +67,7 @@ protected:
     virtual State propagatedState(const State& state) const;
     void forgetScalarValues(State& state) const;
     void updateFlowState(const ICFGNode*, State state);
+    void collectComponentScalarInputs(const ICFGNode*, State&) override;
     void scatterCycleValues(const State&, const ICFGNode*);
 };
 
@@ -79,12 +80,12 @@ public:
     ~FullSparseAbstractInterpretation() override;
 protected:
     bool mergeStatesFromPredecessors(const ICFGNode* node) override;
+    std::optional<ComponentInput> probeComponentInput(const ICFGNode*) override;
     State propagatedState(const State& source) const override;
     void storeValue(const ValVar* pointer, const Interval& interval,
                     const AddressSet& addresses, const ICFGNode* node) override;
 
 private:
-    std::unique_ptr<SVFGBuilder> svfgBuilder_;
     std::unique_ptr<SparseObjGraph> objRoutes_;
     Map<const ICFGNode*, std::set<Variable>> memoryDefinitionSupport_;
 };

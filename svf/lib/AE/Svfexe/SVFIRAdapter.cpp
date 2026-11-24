@@ -1,4 +1,4 @@
-//===- SVFIRAdapter.cpp -- SVFIR to abstract-domain symbols ------------===//
+//===- SVFIRAdapter.cpp -- PAG to abstract-domain symbols ------------===//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -25,9 +25,9 @@
 #include <cstdlib>
 #include "AE/Svfexe/SVFIRAdapter.h"
 
-#include "SVFIR/SVFIR.h"
-#include "SVFIR/SVFType.h"
-#include "SVFIR/SVFVariables.h"
+#include "Graphs/PAG.h"
+#include "SVFValues/SVFType.h"
+#include "SVFValues/SVFVariables.h"
 #include "Util/Options.h"
 #include "Util/SVFUtil.h"
 
@@ -137,7 +137,7 @@ SVF::Interval SVFIRAdapter::floatingConstant(double value)
                SVF::Rational(static_cast<s64_t>(value)));
 }
 
-SVFIRAdapter::SVFIRAdapter(const SVFIR& svfir)
+SVFIRAdapter::SVFIRAdapter(const PAG& svfir)
 {
     auto addScalars = [&](bool pointers)
     {

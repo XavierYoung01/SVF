@@ -1,4 +1,4 @@
-//===- SVFIRAdapter.h -- SVFIR to abstract-domain symbols ----*- C++ -*-===//
+//===- SVFIRAdapter.h -- PAG to abstract-domain symbols ----*- C++ -*-===//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -36,17 +36,17 @@ namespace SVF
 
 class FunObjVar;
 class ObjVar;
-class SVFIR;
+class PAG;
 class ValVar;
 
 /// Owns the IR-specific identity mapping. Abstract-domain states only see
-/// Variable and Location; they never depend on SVF NodeID or SVFIR classes.
+/// Variable and Location; they never depend on SVF NodeID or PAG classes.
 class SVFIRAdapter
 {
 public:
-    explicit SVFIRAdapter(const SVFIR& svfir);
+    explicit SVFIRAdapter(const PAG& svfir);
 
-    /// SVFIR's double projection can overflow for extended FP constants.
+    /// PAG's double projection can overflow for extended FP constants.
     /// Such values have no rational singleton; retain an unconstrained number.
     static SVF::Interval floatingConstant(double value);
 

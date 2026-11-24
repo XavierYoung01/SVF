@@ -41,10 +41,11 @@
 #include "AE/Svfexe/SVFIRAdapter.h"
 #include "Graphs/CallGraph.h"
 #include "Graphs/SCC.h"
-#include "SVFIR/SVFIR.h"
+#include "Graphs/PAG.h"
 #include "Util/SVFBugReport.h"
 #include "Util/WorkList.h"
 #include <memory>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -357,6 +358,17 @@ protected:
     virtual void handleLoopOrRecursion(const ICFGCycleWTO* cycle,
                                        const CallICFGNode* caller);
 
+    void handleWTOComponent(const ICFGWTOComp* comp, const CallICFGNode* caller);
+    bool isInputCoveredByPreIteration(const ICFGWTOComp* comp);
+    struct ComponentInput
+    {
+        State state;
+        NodeBS definedValues;
+        std::set<Variable> memorySupport;
+    };
+    virtual std::optional<ComponentInput> probeComponentInput(const ICFGNode* node);
+    virtual void collectComponentScalarInputs(const ICFGNode*, State&) {}
+
     /// Handle a function body via worklist-driven WTO traversal starting from
     /// funEntry
     void handleFunction(const ICFGNode* funEntry, const CallICFGNode* caller);
@@ -446,12 +458,13 @@ protected:
                      SVF::Variable variable) const;
     void assumeBranch(const IntraCFGEdge* edge, State& state);
 
-    SVFIR* svfir{nullptr};
+    PAG* svfir{nullptr};
     AEWTO* preAnalysis{nullptr};
     SVFIRAdapter adapter_;
     bool equivalentValues(const State& left, const State& right) const;
 
     Map<const ICFGNode*, State> abstractTrace_;
+    Map<const ICFGNode*, ComponentInput> preIterationInputs_;
     Map<const ICFGNode*, NodeBS> definedValues_;
 
     bool shouldApplyNarrowing(const FunObjVar* fun);
