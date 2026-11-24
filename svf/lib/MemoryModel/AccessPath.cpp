@@ -71,7 +71,7 @@ std::optional<APOffset> AccessPath::constantIndex(const ValVar* variable) const
         return std::nullopt;
 
     const auto& literal = constant->getIntegerLiteral();
-    if (!indexBitWidth || indexBitWidth >= literal.bitWidth)
+    if (literal.bitWidth <= 64 || !indexBitWidth || indexBitWidth >= literal.bitWidth)
         return literal.fitsSigned64 ? std::optional<APOffset>(constant->getSExtValue())
                : std::nullopt;
     if (indexBitWidth > 64)

@@ -164,6 +164,9 @@ public:
 
     bool addOffsetVarAndGepTypePair(const ValVar* var, const SVFType* gepIterType);
 
+    /// Interpret a constant index for this access path's pointer layout.
+    std::optional<APOffset> constantIndex(const ValVar* variable) const;
+
     /// Return TRUE if this is a constant location set.
     bool isConstantOffset() const;
 
@@ -186,8 +189,6 @@ protected:
     }
 
 private:
-
-    std::optional<APOffset> constantIndex(const ValVar* variable) const;
 
     /// Check relations of two location sets
     LSRelation checkRelation(const AccessPath& LHS, const AccessPath& RHS);

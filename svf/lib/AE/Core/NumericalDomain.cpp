@@ -2093,13 +2093,12 @@ Interval wrapIntegerInterval(const Interval& operand, unsigned bitWidth,
         return Interval::bottom();
     const Interval range = integerRange(bitWidth, isSigned);
     if (!operand.lower().isFinite() || !operand.upper().isFinite() ||
+            operand.lower().isStrict() || operand.upper().isStrict() ||
             !operand.lower().value().isInteger() ||
             !operand.upper().value().isInteger())
         return range;
     if (operand.isSubsetOf(range))
         return operand;
-    if (operand.lower().isStrict() || operand.upper().isStrict())
-        return range;
 
     const mpz_class lower(
         mpq_numref(operand.lower().value().value().get_mpq_t()));
@@ -2133,9 +2132,25 @@ Interval wrapIntegerInterval(const Interval& operand, unsigned bitWidth,
 Interval zeroExtendIntegerInterval(const Interval& operand,
                                    unsigned sourceBitWidth, bool sourceIsSigned)
 {
-    // The source's signed interpretation affects the encoding, not the bits.
-    (void)sourceIsSigned;
-    return wrapIntegerInterval(operand, sourceBitWidth, false);
+    if (operand.isBottom())
+        return Interval::bottom();
+    const Interval sourceRange = integerRange(sourceBitWidth, sourceIsSigned);
+    const Interval unsignedRange = integerRange(sourceBitWidth, false);
+    if (!operand.isSubsetOf(sourceRange) || !operand.lower().isFinite() ||
+            !operand.upper().isFinite() || operand.lower().isStrict() ||
+            operand.upper().isStrict() || !operand.lower().value().isInteger() ||
+            !operand.upper().value().isInteger())
+        return unsignedRange;
+    if (!sourceIsSigned || operand.lower().value().sign() >= 0)
+        return operand;
+    if (operand.upper().value().sign() >= 0)
+        return unsignedRange;
+
+    mpz_class modulus = 1;
+    mpz_mul_2exp(modulus.get_mpz_t(), modulus.get_mpz_t(), sourceBitWidth);
+    const Rational offset = Rational::fromRaw(mpq_class(modulus));
+    return Interval::closed(operand.lower().value() + offset,
+                            operand.upper().value() + offset);
 }
 
 Interval floatToInteger(const Interval& operand, unsigned bitWidth,

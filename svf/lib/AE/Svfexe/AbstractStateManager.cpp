@@ -30,6 +30,7 @@
 //
 
 #include "AE/Svfexe/AbstractInterpretation.h"
+#include "AE/Core/CheckedInt64.h"
 
 #include "Graphs/PAG.h"
 #include "Util/Options.h"
@@ -63,14 +64,19 @@ Interval gepIndexInterval(const Interval& value, const ValVar& index,
 {
     const auto width = path.getIndexBitWidth();
     const auto* type = SVFUtil::dyn_cast<SVFIntegerType>(index.getType());
-    if (!width || !type || !type->getBitWidth())
-        return value;
-
-    // LLVM sign-extends (including i1) or truncates GEP indices to the
-    // index width of the pointer's address space.
-    if (type->getBitWidth() > width || type->getBitWidth() == 1)
-        return wrapIntegerInterval(value, std::min(width, type->getBitWidth()), true);
+    if (width && type && type->getBitWidth() > 64 && type->getBitWidth() > width)
+        return wrapIntegerInterval(value, width, true);
     return value;
+}
+
+s64_t scaleGepIndex(s64_t index, u32_t elements)
+{
+    const s64_t limit = Options::MaxFieldLimit();
+    if (elements && index > limit / elements)
+        return limit;
+
+    std::int64_t scaled;
+    return CheckedInt64::mul(index, elements, scaled) ? scaled : CheckedInt64::Min;
 }
 
 bool constantInterval(const ValVar* value, SVF::Interval& interval)
@@ -122,25 +128,28 @@ SVF::Interval AbstractInterpretation::getGepElementIndex(const GepStmt* gep)
         const SVFType* type =
             gep->getOffsetVarAndGepTypePairVec()[index].second;
 
-        const Interval value = gepIndexInterval(getInterval(variable, node), *variable,
+        s64_t lower = 0;
+        s64_t upper = 0;
+        if (const auto constant = gep->getAccessPath().constantIndex(variable))
+            lower = upper = *constant;
+        else
+        {
+            const auto value = gepIndexInterval(getInterval(variable, node), *variable,
                                                 gep->getAccessPath());
-        const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
-        // For an unavailable index, keep the existing zero-field policy.
-        s64_t lower = value.isBottom() ? 0 : finiteEndpoint(value.lower(), 0);
-        s64_t upper = value.isBottom() ? 0 : finiteEndpoint(value.upper(), limit);
-        lower = std::clamp(lower, -limit, limit);
-        upper = std::clamp(upper, -limit, limit);
+            // The interpreter uses field zero for an unavailable index.
+            if (!value.isBottom())
+            {
+                lower = finiteEndpoint(value.lower(), 0);
+                upper = finiteEndpoint(value.upper(), Options::MaxFieldLimit());
+            }
+        }
 
         if (SVFUtil::isa<SVFPointerType>(type))
         {
-            const u32_t elements = gep->getAccessPath().getElementNum(
-                                       gep->getAccessPath().gepSrcPointeeType());
-            lower = (double)Options::MaxFieldLimit() / elements < lower
-                    ? Options::MaxFieldLimit()
-                    : lower * elements;
-            upper = (double)Options::MaxFieldLimit() / elements < upper
-                    ? Options::MaxFieldLimit()
-                    : upper * elements;
+            const auto elements = gep->getAccessPath().getElementNum(
+                                      gep->getAccessPath().gepSrcPointeeType());
+            lower = scaleGepIndex(lower, elements);
+            upper = scaleGepIndex(upper, elements);
         }
         else if (type && Options::ModelArrays())
         {
@@ -195,17 +204,19 @@ SVF::Interval AbstractInterpretation::getGepByteOffset(const GepStmt* gep)
                 elementSize =
                     gep->getAccessPath().gepSrcPointeeType()->getByteSize();
 
-            const Interval value = gepIndexInterval(getInterval(variable, node), *variable,
+            s64_t lower;
+            s64_t upper;
+            if (const auto constant = gep->getAccessPath().constantIndex(variable))
+                lower = upper = *constant;
+            else
+            {
+                const auto value = gepIndexInterval(getInterval(variable, node), *variable,
                                                     gep->getAccessPath());
-            const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
-            s64_t lower = std::max<s64_t>(0, finiteEndpoint(value.lower(), 0));
-            s64_t upper = std::max<s64_t>(0, finiteEndpoint(value.upper(), limit));
-            lower = (double)Options::MaxFieldLimit() / elementSize >= lower
-                    ? lower * elementSize
-                    : Options::MaxFieldLimit();
-            upper = (double)Options::MaxFieldLimit() / elementSize >= upper
-                    ? upper * elementSize
-                    : Options::MaxFieldLimit();
+                lower = finiteEndpoint(value.lower(), 0);
+                upper = finiteEndpoint(value.upper(), Options::MaxFieldLimit());
+            }
+            lower = scaleGepIndex(std::max<s64_t>(0, lower), elementSize);
+            upper = scaleGepIndex(std::max<s64_t>(0, upper), elementSize);
             result = SVF::add(result, finiteInterval(lower, upper));
         }
         else if (const auto* structure = SVFUtil::dyn_cast<SVFStructType>(type))
@@ -238,8 +249,12 @@ SVF::AddressSet AbstractInterpretation::getGepObjAddrs(
                bound.value().toInt64();
     };
     const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
-    const APOffset lower = std::clamp(endpoint(offset.lower()), -limit, limit);
-    const APOffset upper = std::clamp(endpoint(offset.upper()), -limit, limit);
+    const auto singleton = offset.isSingleton();
+    // PAG takes the magnitude of negative offsets. Retain exact backward
+    // offsets and exclude the one value with no signed magnitude.
+    const auto minimum = singleton ? CheckedInt64::Min + 1 : -limit;
+    const auto lower = std::clamp(endpoint(offset.lower()), minimum, limit);
+    const auto upper = singleton ? lower : std::min(endpoint(offset.upper()), limit);
     for (APOffset index = lower; index <= upper; ++index)
         for (SVF::Location location : bases)
         {

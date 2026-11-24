@@ -676,7 +676,8 @@ bool PAGBuilder::computeGepOffset(const User *V, AccessPath& ap)
         std::optional<std::int64_t> constantIndex;
         if (op)
         {
-            const auto bits = op->getValue().sextOrTrunc(indexWidth);
+            const auto& raw = op->getValue();
+            const auto bits = raw.getBitWidth() > 64 ? raw.sextOrTrunc(indexWidth) : raw;
             if (!bits.isSignedIntN(64))
             {
                 isConst = false;
@@ -2136,13 +2137,21 @@ const Value* PAGBuilder::getBaseValueForExtArg(const Value* V)
 
     if(const GetElementPtrInst* gep = SVFUtil::dyn_cast<GetElementPtrInst>(value))
     {
-        const bool zeroIndices = std::all_of(gep->idx_begin(), gep->idx_end(),
-                                             [](const llvm::Use& index)
+        // The external model identifies a base when the known signed
+        // indices sum to zero. Dynamic indices do not participate.
+        std::uint64_t total = 0;
+        bool nonzeroWideIndex = false;
+        for (const auto& index : gep->indices())
         {
-            const auto* constant = SVFUtil::dyn_cast<ConstantInt>(index.get());
-            return constant && constant->isZero();
-        });
-        if (zeroIndices && !SVFUtil::isa<StructType>(value->getType()))
+            if (const auto* constant = SVFUtil::dyn_cast<ConstantInt>(index.get()))
+            {
+                if (constant->getBitWidth() <= 64)
+                    total += static_cast<std::uint64_t>(constant->getSExtValue());
+                else if (!constant->isZero())
+                    nonzeroWideIndex = true;
+            }
+        }
+        if (total == 0 && !nonzeroWideIndex && !SVFUtil::isa<StructType>(value->getType()))
             value = gep->getPointerOperand();
     }
     else if (const LoadInst* load = SVFUtil::dyn_cast<LoadInst>(value))

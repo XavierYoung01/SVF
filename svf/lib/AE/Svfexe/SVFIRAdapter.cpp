@@ -108,8 +108,6 @@ template <typename Constant>
 Rational integerValue(const Constant& value)
 {
     const auto& literal = value.getIntegerLiteral();
-    if (literal.bitWidth == 1)
-        return Rational(static_cast<std::int64_t>(value.getZExtValue()));
     if (literal.fitsSigned64)
         return Rational(value.getSExtValue());
     return Rational::fromIntegerBits(literal.wideWords.data(), literal.bitWidth, true);
