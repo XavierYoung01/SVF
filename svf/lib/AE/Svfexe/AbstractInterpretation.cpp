@@ -540,7 +540,8 @@ bool AbstractInterpretation::isSwitchBranchEdgeFeasible(
 bool AbstractInterpretation::collectSwitchRefinement(
     const IntraCFGEdge* edge, SVF::AbstractDomain& state)
 {
-    if (isSwitchDefaultEdge(edge))
+    // BranchStmt only records exact case values up to 64 bits.
+    if (integerWidth(*edge->getCondition()) > 64 || isSwitchDefaultEdge(edge))
         return true;
     const auto* branch = SVFUtil::cast<BranchStmt>(
                              edge->getSrcNode()->getSVFStmts().back());

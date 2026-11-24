@@ -39,5 +39,18 @@ entry:
   %ok = and i1 %all, %us
   %check = zext i1 %ok to i32
   call void @svf_assert(i32 %check)
+  %slot = alloca i128
+  store i128 %b, ptr %slot
+  %condition = load i128, ptr %slot
+  switch i128 %condition, label %exit [
+    i128 18446744073709551615, label %checked
+  ]
+checked:
+  %loaded = load i128, ptr %slot
+  %unchanged = icmp eq i128 %loaded, 18446744073709551615
+  %check.switch = zext i1 %unchanged to i32
+  call void @svf_assert(i32 %check.switch)
+  br label %exit
+exit:
   ret i32 0
 }
