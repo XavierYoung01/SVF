@@ -126,13 +126,15 @@ void BufOverflowDetector::detect(const ICFGNode* node)
                     if (upperAtLeast(accessOffset, size))
                     {
                         addBugToReporter(stmt->getICFGNode(),
-                            {Interval::closed(Rational(lower), Rational(size)), accessOffset}, stmt);
+                        {Interval::closed(Rational(lower), Rational(size)), accessOffset}, stmt);
                     }
                 }
                 if (hasUnknownSizeTarget)
                     addBugToReporter(node,
-                        {Interval(Bound::finite(Rational(0)), Bound::plusInfinity()),
-                         ae.getGepByteOffset(gep)}, stmt);
+                {
+                    Interval(Bound::finite(Rational(0)), Bound::plusInfinity()),
+                    ae.getGepByteOffset(gep)
+                }, stmt);
             }
         }
     }
@@ -474,7 +476,7 @@ bool BufOverflowDetector::detectStrcat(const CallICFGNode *call, BufferOverflowI
         const ValVar* destination = call->getArgument(0);
         const Interval length = ae.getUtils()->getStrlen(destination, call);
         return canSafelyAccessMemory(destination,
-            ae.getUtils()->getStringLastByte(call, length), call, &info);
+                                     ae.getUtils()->getStringLastByte(call, length), call, &info);
     }
     else
     {

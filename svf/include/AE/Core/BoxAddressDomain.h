@@ -26,7 +26,7 @@
 
 #include "AE/Core/AbstractDomain.h"
 #include "AE/Core/AddressDomain.h"
-#include "AE/Core/NumericalDomain.h"
+#include "AE/Core/BoxDomain.h"
 
 #include <cstdlib>
 #include <cassert>

@@ -239,14 +239,14 @@ FullSparseAbstractInterpretation::FullSparseAbstractInterpretation()
     SVFGBuilder builder(true);
     builder.buildFullSVFG(preAnalysis->getPointerAnalysis());
     objRoutes_ = std::make_unique<SparseObjGraph>(
-        *builder.getSVFG(), *icfg, *preAnalysis->getPointerAnalysis(),
-        *svfir);
+                     *builder.getSVFG(), *icfg, *preAnalysis->getPointerAnalysis(),
+                     *svfir);
 }
 
 FullSparseAbstractInterpretation::~FullSparseAbstractInterpretation() = default;
 
 FullSparseAbstractInterpretation::State FullSparseAbstractInterpretation::
-    propagatedState(const State& source) const
+propagatedState(const State& source) const
 {
     if (source.isBottom())
         return bottomState();
@@ -256,16 +256,17 @@ FullSparseAbstractInterpretation::State FullSparseAbstractInterpretation::
 }
 
 void FullSparseAbstractInterpretation::storeValue(const ValVar* pointer,
-                                                  const Interval& interval,
-                                                  const AddressSet& addresses,
-                                                  const ICFGNode* node)
+        const Interval& interval,
+        const AddressSet& addresses,
+        const ICFGNode* node)
 {
     const AddressSet targets = Base::getAddressSet(pointer, node);
     Base::storeValue(pointer, interval, addresses, node);
-    auto record = [&](Location location) {
+    auto record = [&](Location location)
+    {
         const ObjVar* object = objectAt(location);
         if (object && memoryVariable(*object, state(node)) ==
-                          adapter_.contentVariable(*object))
+                adapter_.contentVariable(*object))
             memoryDefinitionSupport_[node].insert(
                 adapter_.contentVariable(*object));
     };
@@ -322,7 +323,7 @@ bool FullSparseAbstractInterpretation::mergeStatesFromPredecessors(
         const ICFGNode* source = sourceNode->getICFGNode();
         const State* input =
             source == node ? (previous ? &*previous : nullptr)
-                           : (hasAbsState(source) ? &state(source) : nullptr);
+            : (hasAbsState(source) ? &state(source) : nullptr);
         if (!input)
             continue;
         std::optional<State> refined;
@@ -339,24 +340,24 @@ bool FullSparseAbstractInterpretation::mergeStatesFromPredecessors(
         const auto& support =
             source == node ? previousSupport : memoryDefinitionSupport_[source];
         for (NodeID base : edge->getBases())
-        for (NodeID id : svfir->getAllFieldsObjVars(svfir->getBaseObject(base)))
-        {
-            const auto* object =
-                SVFUtil::dyn_cast<ObjVar>(svfir->getSVFVar(id));
-            if (!object)
-                continue;
-            const Variable content = adapter_.contentVariable(*object);
-            if (!input->hasValue(content) && !support.count(content))
-                continue;
-            const Variable from = memoryVariable(*object, *values);
-            const Variable to = memoryVariable(*object, merged);
-            if (pulled.test(id))
-                merged.joinValueFrom(to, *values, from);
-            else
-                merged.assignValueFrom(to, *values, from);
-            pulled.set(id);
-            memoryDefinitionSupport_[node].insert(content);
-        }
+            for (NodeID id : svfir->getAllFieldsObjVars(svfir->getBaseObject(base)))
+            {
+                const auto* object =
+                    SVFUtil::dyn_cast<ObjVar>(svfir->getSVFVar(id));
+                if (!object)
+                    continue;
+                const Variable content = adapter_.contentVariable(*object);
+                if (!input->hasValue(content) && !support.count(content))
+                    continue;
+                const Variable from = memoryVariable(*object, *values);
+                const Variable to = memoryVariable(*object, merged);
+                if (pulled.test(id))
+                    merged.joinValueFrom(to, *values, from);
+                else
+                    merged.assignValueFrom(to, *values, from);
+                pulled.set(id);
+                memoryDefinitionSupport_[node].insert(content);
+            }
     }
     return true;
 }

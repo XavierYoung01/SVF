@@ -253,7 +253,7 @@ public:
         const auto value = [](const Bound& bound) -> BoundedInt
         {
             if (bound.isMinusInfinity())
-                return BoundedInt::minus_infinity();
+            return BoundedInt::minus_infinity();
             if (bound.isPlusInfinity())
                 return BoundedInt::plus_infinity();
             const Rational& endpoint = bound.value();

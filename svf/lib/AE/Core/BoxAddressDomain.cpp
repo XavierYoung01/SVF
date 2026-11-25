@@ -175,7 +175,7 @@ const Interval& BoxAddressDomain::boxInterval(Variable variable) const
 {
     static const Interval bottom = Interval::bottom();
     if (isBottomDomain() || (trackInitialization_ &&
-            !mayBeInitialized(numericalInitialization_.value(variable))))
+                             !mayBeInitialized(numericalInitialization_.value(variable))))
         return bottom;
     return static_cast<const BoxDomain&>(*numerical_).boundAt(variable);
 }
@@ -197,11 +197,15 @@ bool BoxAddressDomain::hasSameValues(const BoxAddressDomain& other) const
 {
     if (isBottomDomain() != other.isBottomDomain())
         return false;
-    const auto check = [&](const BoxAddressDomain& source, bool compare) {
+    const auto check = [&](const BoxAddressDomain& source, bool compare)
+    {
         if (!source.trackInitialization_)
             return true;
-        for (const auto* facet : {&source.numericalInitialization_,
-                                  &source.addressInitialization_})
+        for (const auto* facet :
+                {
+                    &source.numericalInitialization_,
+                    &source.addressInitialization_
+                })
             for (const auto& entry : *facet->pages_)
             {
                 auto bits = entry.page->uninitialized | entry.page->initialized;
@@ -211,7 +215,7 @@ bool BoxAddressDomain::hasSameValues(const BoxAddressDomain& other) const
                                             countTrailingZeros(bits), entry.key.type(),
                                             entry.key.role());
                     if (compare ? !hasSameValue(variable, other)
-                                : (!hasValue(variable) && other.hasValue(variable)))
+                            : (!hasValue(variable) && other.hasValue(variable)))
                         return false;
                     bits &= bits - 1;
                 }

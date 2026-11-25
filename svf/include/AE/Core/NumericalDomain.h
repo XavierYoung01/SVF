@@ -213,6 +213,22 @@ public:
 
     /// Ordering used by upper bounds: tighter/smaller first.
     static int compare(const Bound& lhs, const Bound& rhs);
+    /// Order lower bounds, with strict bounds larger at the same value.
+    static int compareLower(const Bound& lhs, const Bound& rhs)
+    {
+        if (lhs.kind() != rhs.kind())
+            return static_cast<int>(lhs.kind()) < static_cast<int>(rhs.kind()) ? -1
+                   : 1;
+        if (!lhs.isFinite())
+            return 0;
+        if (lhs.value() < rhs.value())
+            return -1;
+        if (rhs.value() < lhs.value())
+            return 1;
+        if (lhs.isStrict() == rhs.isStrict())
+            return 0;
+        return lhs.isStrict() ? 1 : -1;
+    }
     static Bound min(const Bound& lhs, const Bound& rhs);
     static Bound max(const Bound& lhs, const Bound& rhs);
     static Bound add(const Bound& lhs, const Bound& rhs);
@@ -444,19 +460,6 @@ struct OperationMetadata
     std::string reason;
 };
 
-struct NumericalTelemetry
-{
-    std::uint64_t relationalClosureCalls = 0;
-    std::uint64_t relationalClosureConstraintExports = 0;
-    std::uint64_t relationalClosureIndexedQueries = 0;
-    std::uint64_t joinCalls = 0;
-    std::uint64_t wideningCalls = 0;
-    std::uint64_t narrowingCalls = 0;
-    std::uint64_t partialInsideOperations = 0;
-    std::uint64_t partialFallbackOperations = 0;
-    std::uint64_t partialProjections = 0;
-};
-
 struct Diagnostic
 {
     OperationKind operation;
@@ -480,11 +483,6 @@ public:
     using RawBuffer = std::vector<std::uint8_t>;
 
     ~NumericalDomain() override = default;
-
-    /// Process-local counters used only by explicitly enabled profiling runs.
-    /// Analysis is single-threaded while these counters are active.
-    static void beginTelemetry();
-    static NumericalTelemetry endTelemetry();
 
     /// Return a deterministic semantic hash. Compatible properties that are
     /// equivalent according to isEquivalentTo() have the same hash. Hash
@@ -593,14 +591,6 @@ protected:
     /// physical representation can answer this without exporting constraints.
     virtual std::vector<Variable> relationalClosureState(
         const std::vector<Variable>& seeds) const;
-    /// Delegate a product wrapper's already-counted closure query to one of
-    /// its numerical facets without incrementing the public call counter a
-    /// second time. The facet still records export-vs-index telemetry.
-    static std::vector<Variable> delegateRelationalClosureState(
-        const NumericalDomain& facet,
-        const std::vector<Variable>& seeds);
-    void recordRelationalClosureConstraintExport() const;
-    void recordRelationalClosureIndexedQuery() const;
     /// Evaluate nonlinear and finite IEEE trees by sound interval semantics,
     /// applying each IEEE node's requested rounding mode at its endpoints.
     /// Exceptional IEEE outcomes conservatively produce top.
@@ -615,228 +605,9 @@ protected:
     void recordOperation(OperationKind operation,
                          ApproximationKind approximation, bool best,
                          std::string reason = {}) const;
-    void recordPartialOperation(bool inside) const;
-    void recordPartialProjection() const;
 
 private:
     mutable OperationMetadata lastOperation_;
-};
-
-enum class BoxStorage
-{
-    Hash = 0,
-    Page1 = 1,
-    Page2 = 2,
-    Page4 = 4,
-    Page8 = 8,
-    Page16 = 16
-};
-
-struct BoxStorageConfig
-{
-    BoxStorage values = BoxStorage::Page8;
-    BoxStorage objectContents = BoxStorage::Page8;
-};
-
-struct BoxSemanticConfig
-{
-    bool integerTightening = true;
-    std::shared_ptr<DiagnosticSink> diagnostics;
-    BoxStorageConfig storage;
-
-    bool operationCompatible(const BoxSemanticConfig& other) const
-    {
-        return integerTightening == other.integerTightening;
-    }
-};
-
-/// Non-relational numerical property with finite non-Top support over stable
-/// typed Variables. Variable IDs are the global sparse page coordinates.
-class BoxDomain final : public NumericalDomain
-{
-    friend class BoxAddressDomain;
-
-public:
-    using NumericalDomain::assignParallel;
-    using NumericalDomain::bound;
-    using NumericalDomain::substitute;
-    using NumericalDomain::substituteParallel;
-
-    static BoxDomain top(const BoxSemanticConfig& config = {});
-    static BoxDomain bottom(const BoxSemanticConfig& config = {});
-    static BoxDomain fromConstraints(const LinearConstraintSet& constraints,
-                                     const BoxSemanticConfig& config = {});
-
-    BoxDomain(const BoxDomain& other);
-    BoxDomain(BoxDomain&& other) noexcept = default;
-    BoxDomain& operator=(const BoxDomain& other) = default;
-    BoxDomain& operator=(BoxDomain&& other) noexcept = default;
-
-    DomainKind kind() const noexcept override
-    {
-        return DomainKind::Box;
-    }
-    std::unique_ptr<AbstractDomain> clone() const override;
-    const BoxSemanticConfig& config() const
-    {
-        return config_;
-    }
-
-    void assign(Variable target, const LinearExpression& expression) override;
-    void assign(Variable target, const TreeExpression& expression) override;
-    void assignParallel(const LinearAssignmentList& assignments) override;
-    void substitute(Variable target,
-                    const LinearExpression& expression) override;
-    void substituteParallel(const LinearAssignmentList& assignments) override;
-    void assume(const LinearConstraint& constraint) override;
-    void assume(const TreeConstraint& constraint) override;
-    void assumeAll(const LinearConstraintSet& constraints) override;
-    void forget(Variable variable) override;
-    void project(const std::vector<Variable>& retained) override;
-    void expand(Variable source, const std::vector<Variable>& copies) override;
-    void fold(Variable target, const std::vector<Variable>& folded) override;
-
-    CheckResult entails(const LinearConstraint& constraint) const override;
-    Interval bound(Variable variable) const override;
-    Interval bound(const LinearExpression& expression) const override;
-    /// Variables whose bounds are represented explicitly because they are
-    /// stricter than the analysis-wide Top default. This is a storage
-    /// observation for sparse scheduling; absence never means undefined.
-    std::vector<Variable> constrainedVariables() const;
-    std::vector<Variable> constrainedVariablesBefore(
-        Variable upperBound) const;
-    std::vector<Variable> supportVariables() const override
-    {
-        return constrainedVariables();
-    }
-    LinearConstraintSet toConstraints() const override;
-    void close() override;
-    void canonicalize() override;
-
-    BoxDomain join(const BoxDomain& other) const;
-    BoxDomain meet(const BoxDomain& other) const;
-    BoxDomain widen(const BoxDomain& next) const;
-    BoxDomain widen(const BoxDomain& next, const WideningPolicy& policy) const;
-    BoxDomain narrow(const BoxDomain& next) const;
-
-private:
-    struct BoundSlot
-    {
-        Variable variable;
-        Interval interval;
-
-        friend bool operator==(const BoundSlot& lhs, const BoundSlot& rhs)
-        {
-            return lhs.variable == rhs.variable && lhs.interval == rhs.interval;
-        }
-    };
-
-    class BoundStore
-    {
-        using Slot = std::optional<BoundSlot>;
-        using Page = std::shared_ptr<Slot>;
-        struct PageEntry
-        {
-            std::size_t index;
-            Page page;
-        };
-        using Hash = std::unordered_map<std::uint32_t, BoundSlot>;
-        using Directory = std::vector<PageEntry>;
-
-        template <typename Pages>
-        static auto findPage(Pages& pages, std::size_t index)
-        {
-            return std::lower_bound(pages.begin(), pages.end(), index,
-                                    [](const PageEntry& entry, std::size_t key)
-            {
-                return entry.index < key;
-            });
-        }
-
-        template <std::size_t Width>
-        static Page allocatePage()
-        {
-            auto slots = std::make_shared<std::array<Slot, Width>>();
-            return Page(slots, slots->data());
-        }
-
-        Page newPage() const;
-        void detach(Page& page) const;
-        bool emptyPage(const Page& page) const;
-
-        std::uint32_t width_;
-        std::variant<Hash, Directory> storage_;
-
-    public:
-        explicit BoundStore(BoxStorage storage);
-        const BoundSlot* find(std::uint32_t id) const;
-        void assign(BoundSlot slot);
-        void erase(Variable variable);
-        void join(const BoundStore& other);
-        bool equalPages(const BoundStore& other) const;
-        void clear();
-        bool empty() const;
-        BoundStore without(const std::set<Variable>& omitted) const;
-
-        template <typename Visitor>
-        bool forEach(Visitor visit) const
-        {
-            if (const auto* hash = std::get_if<Hash>(&storage_))
-            {
-                for (const auto& item : *hash)
-                    if (!visit(item.second))
-                        return false;
-            }
-            else
-            {
-                for (const auto& entry : std::get<Directory>(storage_))
-                    for (std::size_t i = 0; i < width_; ++i)
-                    {
-                        const auto& slot = entry.page.get()[i];
-                        if (slot && !visit(*slot))
-                            return false;
-                    }
-            }
-            return true;
-        }
-    };
-
-    BoxDomain(BoxSemanticConfig config, bool bottom);
-
-    const void* dynamicTypeToken() const noexcept override
-    {
-        return staticTypeToken<BoxDomain>();
-    }
-    bool hasCompatibleDomain(const AbstractDomain& other) const override;
-    void joinDomain(const AbstractDomain& other) override;
-    void meetDomain(const AbstractDomain& other) override;
-    void widenDomain(const AbstractDomain& next) override;
-    void narrowDomain(const AbstractDomain& next) override;
-    bool isBottomDomain() const override;
-    bool isTopDomain() const override;
-    bool leqDomain(const AbstractDomain& other) const override;
-    std::string domainToString() const override;
-
-    const BoxDomain& requireBox(const AbstractDomain& other) const;
-    const Interval& boundAt(Variable variable) const;
-    void storeBound(Variable variable, Interval interval);
-    void eraseBound(Variable variable);
-    BoundStore& storeFor(Variable variable);
-    const BoundStore& storeFor(Variable variable) const;
-    BoxDomain withoutBounds(const std::set<Variable>& omitted) const;
-    std::vector<Variable> boundedVariables() const;
-    std::vector<Variable> boundedVariablesBefore(
-        Variable upperBound) const;
-    void makeBottom();
-    void canonicalize(Variable variable);
-    void assignInterval(Variable target, const Interval& value) override;
-    void setBound(Variable variable, Interval interval);
-    void report(OperationKind operation, ApproximationKind approximation,
-                std::string reason, bool best = true) const;
-    BoxSemanticConfig config_;
-    BoundStore values_;
-    BoundStore objectContents_;
-    bool bottom_ = false;
 };
 
 class LinearExpression
@@ -1083,41 +854,6 @@ struct TreeAssignment
 
 using TreeAssignmentList = std::vector<TreeAssignment>;
 
-/// Selects the physical carrier of an Octagon DBM.  This is deliberately not
-/// part of the abstract semantics: states using different carriers may be
-/// combined, compared, and converted without approximation.
-enum class OctagonStorageKind
-{
-    DenseHalf,
-    SparseFinite,
-    ComponentDense
-};
-
-const char* octagonStorageKindName(OctagonStorageKind kind);
-OctagonStorageKind octagonStorageKindFromName(const std::string& name);
-
-struct OctagonConfig
-{
-    bool strongClosure = true;
-    bool integerTightening = true;
-    OctagonStorageKind storage = OctagonStorageKind::DenseHalf;
-    /// ComponentDense only: share component matrices across abstract-state
-    /// copies until the first write. Disabling this keeps identical abstract
-    /// semantics but moves the matrix-copy cost from mutation to clone.
-    bool componentCopyOnWrite = true;
-    /// Use the quadratic single-variable closure repair where its precondition
-    /// holds. Disabling it computes the same canonical state with full closure.
-    bool incrementalClosure = true;
-    std::shared_ptr<DiagnosticSink> diagnostics;
-
-    /// Diagnostics affect observation only, not abstract-state semantics.
-    bool operationCompatible(const OctagonConfig& other) const
-    {
-        return strongClosure == other.strongClosure &&
-               integerTightening == other.integerTightening;
-    }
-};
-
 using Dimension = std::size_t;
 
 struct DimensionEntry
@@ -1235,10 +971,7 @@ private:
     std::shared_ptr<const std::vector<DimensionEntry>> entries_;
 };
 
-std::unique_ptr<NumericalDomain> makeNumericalDomain(
-    DomainKind kind, bool bottom, const OctagonConfig& config = {});
-std::unique_ptr<NumericalDomain> makeOctagonDomain(
-    bool bottom = false, const OctagonConfig& config = {});
+std::unique_ptr<NumericalDomain> makeNumericalDomain(DomainKind kind, bool bottom);
 
 } // namespace SVF
 

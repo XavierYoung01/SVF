@@ -3436,7 +3436,6 @@ std::vector<Variable> OctagonDomain::supportVariables() const
 std::vector<Variable> OctagonDomain::relationalClosureState(
     const std::vector<Variable>& seeds) const
 {
-    recordRelationalClosureIndexedQuery();
     return impl_->relationalClosureCurrent(layout(), seeds);
 }
 
@@ -3539,6 +3538,13 @@ void OctagonDomain::assignParallel(const LinearAssignmentList& assignments)
     changeLayout(original);
     recordOperation(OperationKind::Assignment, ApproximationKind::SoundOverApproximation, false,
                     "simultaneous octagonal abstraction through fresh coordinates");
+}
+
+std::unique_ptr<NumericalDomain> makeOctagonDomain(
+    bool bottom, const OctagonConfig& config)
+{
+    return std::make_unique<OctagonDomain>(
+               bottom ? OctagonDomain::bottom(config) : OctagonDomain::top(config));
 }
 
 } // namespace SVF

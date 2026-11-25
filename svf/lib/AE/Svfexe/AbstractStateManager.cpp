@@ -360,7 +360,7 @@ AbstractInterpretation::makeNumericalDomain(bool bottom) const
     BoxSemanticConfig config;
     config.storage = boxStorage_;
     return std::make_unique<SVF::BoxDomain>(bottom ? SVF::BoxDomain::bottom(config)
-                                           : SVF::BoxDomain::top(config));
+                                            : SVF::BoxDomain::top(config));
 }
 
 AbstractInterpretation::State& AbstractInterpretation::
@@ -862,8 +862,8 @@ bool AbstractInterpretation::isBranchEdgeFeasibleAt(
         const auto* branch =
             SVFUtil::cast<BranchStmt>(edge->getSrcNode()->getSVFStmts().back());
         if (branch->getNumSuccessors() == 2 &&
-            branch->getSuccessorCondValue(0) == 1 &&
-            branch->getSuccessorCondValue(1) == 0)
+                branch->getSuccessorCondValue(0) == 1 &&
+                branch->getSuccessorCondValue(1) == 0)
         {
             Interval value = getInterval(condition, predecessor);
             value.meetWith(

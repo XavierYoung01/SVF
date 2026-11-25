@@ -26,62 +26,65 @@
 #include <cstdint>
 #include <limits>
 
-namespace SVF::CheckedInt64
+namespace SVF
 {
 
-using Int = std::int64_t;
-constexpr auto Min = std::numeric_limits<Int>::min();
-constexpr auto Max = std::numeric_limits<Int>::max();
-
-inline bool add(Int lhs, Int rhs, Int& result)
+struct CheckedInt64
 {
-#if defined(__clang__) || defined(__GNUC__)
-    return !__builtin_add_overflow(lhs, rhs, &result);
-#else
-    if ((rhs > 0 && lhs > Max - rhs) || (rhs < 0 && lhs < Min - rhs))
-        return false;
-    result = lhs + rhs;
-    return true;
-#endif
-}
+    using Int = std::int64_t;
+    static constexpr auto Min = std::numeric_limits<Int>::min();
+    static constexpr auto Max = std::numeric_limits<Int>::max();
 
-inline bool sub(Int lhs, Int rhs, Int& result)
-{
-#if defined(__clang__) || defined(__GNUC__)
-    return !__builtin_sub_overflow(lhs, rhs, &result);
-#else
-    if ((rhs < 0 && lhs > Max + rhs) || (rhs > 0 && lhs < Min + rhs))
-        return false;
-    result = lhs - rhs;
-    return true;
-#endif
-}
-
-inline bool mul(Int lhs, Int rhs, Int& result)
-{
-#if defined(__clang__) || defined(__GNUC__)
-    return !__builtin_mul_overflow(lhs, rhs, &result);
-#else
-    if (lhs > 0)
+    static bool add(Int lhs, Int rhs, Int& result)
     {
-        if ((rhs > 0 && lhs > Max / rhs) || (rhs < 0 && rhs < Min / lhs))
+#if defined(__clang__) || defined(__GNUC__)
+        return !__builtin_add_overflow(lhs, rhs, &result);
+#else
+        if ((rhs > 0 && lhs > Max - rhs) || (rhs < 0 && lhs < Min - rhs))
             return false;
-    }
-    else if ((rhs > 0 && lhs < Min / rhs) || (rhs < 0 && lhs < Max / rhs))
-        return false;
-    result = lhs * rhs;
-    return true;
+        result = lhs + rhs;
+        return true;
 #endif
-}
+    }
 
-inline bool div(Int lhs, Int rhs, Int& result)
-{
-    if (rhs == 0 || (lhs == Min && rhs == -1))
-        return false;
-    result = lhs / rhs;
-    return true;
-}
+    static bool sub(Int lhs, Int rhs, Int& result)
+    {
+#if defined(__clang__) || defined(__GNUC__)
+        return !__builtin_sub_overflow(lhs, rhs, &result);
+#else
+        if ((rhs < 0 && lhs > Max + rhs) || (rhs > 0 && lhs < Min + rhs))
+            return false;
+        result = lhs - rhs;
+        return true;
+#endif
+    }
 
-} // namespace SVF::CheckedInt64
+    static bool mul(Int lhs, Int rhs, Int& result)
+    {
+#if defined(__clang__) || defined(__GNUC__)
+        return !__builtin_mul_overflow(lhs, rhs, &result);
+#else
+        if (lhs > 0)
+        {
+            if ((rhs > 0 && lhs > Max / rhs) || (rhs < 0 && rhs < Min / lhs))
+                return false;
+        }
+        else if ((rhs > 0 && lhs < Min / rhs) || (rhs < 0 && lhs < Max / rhs))
+            return false;
+        result = lhs * rhs;
+        return true;
+#endif
+    }
+
+    static bool div(Int lhs, Int rhs, Int& result)
+    {
+        if (rhs == 0 || (lhs == Min && rhs == -1))
+            return false;
+        result = lhs / rhs;
+        return true;
+    }
+};
+
+} // namespace SVF
 
 #endif // SVF_AE_CHECKED_INT64_H

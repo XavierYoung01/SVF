@@ -507,7 +507,7 @@ Location AbsExtAPI::getStringField(const ObjVar& object, u32_t index)
 }
 
 Interval AbsExtAPI::getStringLastByte(const CallICFGNode* call,
-                                     const Interval& length)
+                                      const Interval& length)
 {
     Interval width = integerInterval(1);
     if (call->getCalledFunction()->getName().find("wcs") != std::string::npos)
@@ -599,7 +599,7 @@ Interval AbsExtAPI::getStrncatLength(const CallICFGNode* call)
 }
 
 void AbsExtAPI::handleStringCopy(const CallICFGNode* call,
-                                const Interval& length, const Interval& start)
+                                 const Interval& length, const Interval& start)
 {
     const auto* src = call->getArgument(1);
     const AddressSet targets = ae->getAddressSet(call->getArgument(0), call);

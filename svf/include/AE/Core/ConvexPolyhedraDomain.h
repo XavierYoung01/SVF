@@ -24,7 +24,7 @@
 #ifndef SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
 #define SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
 
-#include "AE/Core/NumericalDomain.h"
+#include "AE/Core/BoxDomain.h"
 
 #include <memory>
 #include <vector>

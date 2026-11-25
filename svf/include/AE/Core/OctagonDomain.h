@@ -24,13 +24,48 @@
 #ifndef SVF_AE_OCTAGON_DOMAIN_H
 #define SVF_AE_OCTAGON_DOMAIN_H
 
-#include "AE/Core/NumericalDomain.h"
+#include "AE/Core/BoxDomain.h"
 
 #include <memory>
 #include <string>
 
 namespace SVF
 {
+/// Selects the physical carrier of an Octagon DBM.  This is deliberately not
+/// part of the abstract semantics: states using different carriers may be
+/// combined, compared, and converted without approximation.
+enum class OctagonStorageKind
+{
+    DenseHalf,
+    SparseFinite,
+    ComponentDense
+};
+
+const char* octagonStorageKindName(OctagonStorageKind kind);
+OctagonStorageKind octagonStorageKindFromName(const std::string& name);
+
+struct OctagonConfig
+{
+    bool strongClosure = true;
+    bool integerTightening = true;
+    OctagonStorageKind storage = OctagonStorageKind::DenseHalf;
+    /// ComponentDense only: share component matrices across abstract-state
+    /// copies until the first write. Disabling this keeps identical abstract
+    /// semantics but moves the matrix-copy cost from mutation to clone.
+    bool componentCopyOnWrite = true;
+    /// Use the quadratic single-variable closure repair where its precondition
+    /// holds. Disabling it computes the same canonical state with full closure.
+    bool incrementalClosure = true;
+    std::shared_ptr<DiagnosticSink> diagnostics;
+
+    /// Diagnostics affect observation only, not abstract-state semantics.
+    bool operationCompatible(const OctagonConfig& other) const
+    {
+        return strongClosure == other.strongClosure &&
+               integerTightening == other.integerTightening;
+    }
+};
+
 struct OctagonStorageStats
 {
     OctagonStorageKind kind = OctagonStorageKind::DenseHalf;
@@ -175,6 +210,11 @@ private:
     DimensionLayout layout_;
     std::unique_ptr<Impl> impl_;
 };
+
+std::unique_ptr<NumericalDomain> makeNumericalDomain(
+    DomainKind kind, bool bottom, const OctagonConfig& config);
+std::unique_ptr<NumericalDomain> makeOctagonDomain(
+    bool bottom = false, const OctagonConfig& config = {});
 
 } // namespace SVF
 

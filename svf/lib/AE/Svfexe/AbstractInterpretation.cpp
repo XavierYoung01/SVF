@@ -569,8 +569,8 @@ bool AbstractInterpretation::collectSwitchRefinement(
     const ObjVar* object = objectAt(*targets.begin());
     if (object && object->getId() != PAGBase::NullPtr && object->getId() != PAGBase::BlackHole)
         return recordBranchRefinement(object->getId(),
-                               SVF::Interval::singleton(SVF::Rational(caseValue)), state,
-                               load->getICFGNode(), edge->getDstNode());
+                                      SVF::Interval::singleton(SVF::Rational(caseValue)), state,
+                                      load->getICFGNode(), edge->getDstNode());
     return true;
 }
 
@@ -663,8 +663,8 @@ bool AbstractInterpretation::collectBranchRefinement(
                                     if (const ObjVar* object = objectAt(location))
 
                                         feasible &= recordBranchRefinement(
-                                            object->getId(), narrowed, state,
-                                            loadIcfg, succNode);
+                                                        object->getId(), narrowed, state,
+                                                        loadIcfg, succNode);
                                 }
                             }
                         }
@@ -789,7 +789,8 @@ AbstractInterpretation::probeComponentInput(const ICFGNode* node)
     {
         const auto current = definedValues_.find(node);
         input = ComponentInput{state(node),
-            current == definedValues_.end() ? NodeBS{} : current->second, {}};
+                               current == definedValues_.end() ? NodeBS{} :
+                               current->second, {}};
     }
 
     if (previousDefinitions)
@@ -808,7 +809,7 @@ bool AbstractInterpretation::isInputCoveredByPreIteration(const ICFGWTOComp* com
 {
     const auto* singleton = SVFUtil::dyn_cast<ICFGSingletonWTO>(comp);
     const ICFGNode* head = singleton ? singleton->getICFGNode()
-        : SVFUtil::cast<ICFGCycleWTO>(comp)->head()->getICFGNode();
+                           : SVFUtil::cast<ICFGCycleWTO>(comp)->head()->getICFGNode();
     auto input = probeComponentInput(head);
     if (!input)
         return false;
@@ -1207,7 +1208,7 @@ void AbstractInterpretation::updateStateOnAddr(const AddrStmt* addr)
 }
 
 static Interval unsignedWrappingOperation(const BinaryOPStmt& binary, const Interval& lhs,
-                                          const Interval& rhs, unsigned width)
+        const Interval& rhs, unsigned width)
 {
     const auto left = SVF::wrapIntegerInterval(lhs, width, false);
     const auto right = SVF::wrapIntegerInterval(rhs, width, false);
@@ -1325,7 +1326,7 @@ void AbstractInterpretation::updateStateOnBinary(const BinaryOPStmt* binary)
             result.meetWith(SVF::integerRange(width, true));
 
         result = result.isBottom() ? Interval::top()
-                                   : SVF::wrapIntegerInterval(result, width, true);
+                 : SVF::wrapIntegerInterval(result, width, true);
     }
     updateInterval(binary->getRes(), result, node);
 }
@@ -1582,7 +1583,7 @@ void AbstractInterpretation::updateStateOnCopy(const CopyStmt* copy)
         }
         else
             updateInterval(lhsVar, SVF::wrapIntegerInterval(rhsInterval,
-                           type->getByteSize() * 8, type->isSigned()), node);
+                    type->getByteSize() * 8, type->isSigned()), node);
     }
     else if (copy->getCopyKind() == CopyStmt::FPTRUNC)
     {
