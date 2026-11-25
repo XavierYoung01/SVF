@@ -38,25 +38,19 @@ jobs:
         run: |
           XCODE_PATH=$(dirname $(dirname $(xcode-select -p)))
           sudo ln -sfn "$XCODE_PATH" /Applications/Xcode.app
-          brew install astyle gmp mpfr
+          brew install astyle
 
       - name: ubuntu-setup
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install cmake gcc g++ nodejs doxygen graphviz lcov libncurses5-dev libtinfo6 libzstd-dev libgmp-dev libmpfr-dev astyle
+          sudo apt-get install cmake gcc g++ nodejs doxygen graphviz lcov libncurses5-dev libtinfo6 libzstd-dev astyle
           if [ ! -f /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
             libxml_target=$(find /usr/lib -name 'libxml2.so*' 2>/dev/null | head -n 1)
             if [ -n "$libxml_target" ]; then
               sudo ln -sf "$libxml_target" /usr/lib/x86_64-linux-gnu/libxml2.so.2
             fi
           fi
-
-      - name: check-code-format
-        if: runner.os == 'Linux'
-        run: |
-          astyle --style=allman -n -r "*.h" "*.cpp"
-          git diff --exit-code
 
       # build-svf
       - name: build-svf

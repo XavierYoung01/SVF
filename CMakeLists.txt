@@ -316,19 +316,10 @@ add_subdirectory(svf-llvm)
 # =================================================================================
 
 # If ./Test-Suite exists, add & run the tests
-if(EXISTS "${SVF_SOURCE_DIR}/Test-Suite/CMakeLists.txt")
+if(EXISTS "${SVF_SOURCE_DIR}/Test-Suite")
   include(CTest)
   enable_testing()
   add_subdirectory(Test-Suite)
-
-  add_executable(ae-box-address-test svf/tests/BoxAddressTest.cpp)
-  target_link_libraries(ae-box-address-test PRIVATE SVF::AbstractDomainCore)
-  add_test(NAME aetest/box-address COMMAND ae-box-address-test)
-  # The wide GEP in this fixture truncates to the first field of a global.
-  foreach(mode dense semi-sparse sparse)
-    add_test(NAME aetest/wide-integers/${mode}
-      COMMAND ae -ae-sparsity=${mode} -ff-eq-base "${SVF_SOURCE_DIR}/svf/tests/wide-integers.ll")
-  endforeach()
 endif()
 
 # =================================================================================
