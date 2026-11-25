@@ -31,11 +31,10 @@
 #include "Util/Options.h"
 #include "WPA/Andersen.h"
 
-#include "AE/Core/AbstractState.h"
-#include "AE/Core/RelExeState.h"
-#include "AE/Core/RelationSolver.h"
+#include "AE/Core/BoxAddressDomain.h"
+#include "AE/Core/ConvexPolyhedraDomain.h"
+#include "AE/Core/OctagonDomain.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include <chrono>
 #include <limits>
 
 using namespace SVF;
@@ -44,7 +43,7 @@ using namespace SVFUtil;
 
 static Option<bool> SYMABS(
     "symabs",
-    "symbolic abstraction test",
+    "relational abstract domain test",
     false
 );
 
@@ -54,853 +53,78 @@ static Option<bool> AETEST(
     false
 );
 
-class SymblicAbstractionTest
+static void testRelationalDomains()
 {
-public:
-    SymblicAbstractionTest() = default;
-
-    ~SymblicAbstractionTest() = default;
-
-    static z3::context& getContext()
+    const LinearExpression x(Variable(1));
+    const LinearExpression y(Variable(2));
+    const LinearExpression one(Rational(1));
+    const LinearConstraintSet constraints
     {
-        return Z3Expr::getContext();
-    }
-
-    void test_print()
-    {
-        outs() << "hello print\n";
-    }
-
-    AbstractState RSY_time(AbstractState& inv, const Z3Expr& phi,
-                           RelationSolver& rs)
-    {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                            end_time - start_time);
-        outs() << "running time of RSY      : " << duration.count()
-               << " microseconds\n";
-        return resRSY;
-    }
-    AbstractState Bilateral_time(AbstractState& inv, const Z3Expr& phi,
-                                 RelationSolver& rs)
-    {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                            end_time - start_time);
-        outs() << "running time of Bilateral: " << duration.count()
-               << " microseconds\n";
-        return resBilateral;
-    }
-    AbstractState BS_time(AbstractState& inv, const Z3Expr& phi,
-                          RelationSolver& rs)
-    {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        AbstractState resBS = rs.BS(inv, phi);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                            end_time - start_time);
-        outs() << "running time of BS       : " << duration.count()
-               << " microseconds\n";
-        return resBS;
-    }
-
-    void testRelExeState1_1()
-    {
-        outs() << sucMsg("\t SUCCESS :") << "test1_1 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 1];
-        itv[0] = IntervalValue(0, 1);
-        relation[0] = getContext().int_const("0");
-        // var1 := var0 + 1;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0") + 1;
-        itv[1] = itv[0].getInterval() + IntervalValue(1);
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[1], res);
-        assert(res == Set<u32_t>({0, 1}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[0,1] 1:[1,2]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 1)}, {1, IntervalValue(1, 2)}};
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState1_2()
-    {
-        outs() << "test1_2 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 1];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 1);
-        // var1 := var0 + 1;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0") * 2;
-        itv[1] = itv[0].getInterval() * IntervalValue(2);
-
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[1], res);
-        assert(res == Set<u32_t>({0, 1}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[0,1] 1:[0,2]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 1)}, {1, IntervalValue(0, 2)}};
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState2_1()
-    {
-        outs() << "test2_1 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 10];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 10);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 - var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") - getContext().int_const("0");
-        itv[2] = itv[1].getInterval() - itv[0].getInterval();
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[0,10] 1:[0,10] 2:[0,0]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 10)},
-            {1, IntervalValue(0, 10)},
-            {2, IntervalValue(0, 0)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState2_2()
-    {
-        outs() << "test2_2 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 100];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 100);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 - var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") - getContext().int_const("0");
-        itv[2] = itv[1].getInterval() - itv[0].getInterval();
-
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[0,100] 1:[0,100] 2:[0,0]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 100)},
-            {1, IntervalValue(0, 100)},
-            {2, IntervalValue(0, 0)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState2_3()
-    {
-        outs() << "test2_3 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 1000];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 1000);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 - var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") - getContext().int_const("0");
-        itv[2] = itv[1].getInterval() - itv[0].getInterval();
-
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[0,1000] 1:[0,1000] 2:[0,0]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 1000)},
-            {1, IntervalValue(0, 1000)},
-            {2, IntervalValue(0, 0)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState2_4()
-    {
-        outs() << "test2_4 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 10000];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 10000);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 - var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") - getContext().int_const("0");
-        itv[2] = itv[1].getInterval() - itv[0].getInterval();
-
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = RSY_time(inv, phi, rs);
-        AbstractState resBilateral = Bilateral_time(inv, phi, rs);
-        AbstractState resBS = BS_time(inv, phi, rs);
-        // 0:[0,10000] 1:[0,10000] 2:[0,0]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 10000)},
-            {1, IntervalValue(0, 10000)},
-            {2, IntervalValue(0, 0)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState2_5()
-    {
-        outs() << "test2_5 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 100000];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 100000);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 - var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") - getContext().int_const("0");
-        itv[2] = itv[1].getInterval() - itv[0].getInterval();
-
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = RSY_time(inv, phi, rs);
-        AbstractState resBilateral = Bilateral_time(inv, phi, rs);
-        AbstractState resBS = BS_time(inv, phi, rs);
-        // 0:[0,100000] 1:[0,100000] 2:[0,0]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 100000)},
-            {1, IntervalValue(0, 100000)},
-            {2, IntervalValue(0, 0)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState3_1()
-    {
-        outs() << "test3_1 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [1, 10];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(1, 10);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 / var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") / getContext().int_const("0");
-        itv[2] = itv[1].getInterval() / itv[0].getInterval();
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[1,10] 1:[1,10] 2:[1,1]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(1, 10)},
-            {1, IntervalValue(1, 10)},
-            {2, IntervalValue(1, 1)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState3_2()
-    {
-        outs() << "test3_2 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [1, 1000];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(1, 1000);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 / var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") / getContext().int_const("0");
-        itv[2] = itv[1].getInterval() / itv[0].getInterval();
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = rs.RSY(inv, phi);
-        AbstractState resBilateral = rs.bilateral(inv, phi);
-        AbstractState resBS = rs.BS(inv, phi);
-        // 0:[1,1000] 1:[1,1000] 2:[1,1]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(1, 1000)},
-            {1, IntervalValue(1, 1000)},
-            {2, IntervalValue(1, 1)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState3_3()
-    {
-        outs() << "test3_3 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [1, 10000];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(1, 10000);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 / var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") / getContext().int_const("0");
-        itv[2] = itv[1].getInterval() / itv[0].getInterval();
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = RSY_time(inv, phi, rs);
-        AbstractState resBilateral = Bilateral_time(inv, phi, rs);
-        AbstractState resBS = BS_time(inv, phi, rs);
-        // 0:[1,10000] 1:[1,10000] 2:[1,1]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(1, 10000)},
-            {1, IntervalValue(1, 10000)},
-            {2, IntervalValue(1, 1)}
-        };
-    }
-
-    void testRelExeState3_4()
-    {
-        outs() << "test3_4 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [1, 100000];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(1, 100000);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 / var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") / getContext().int_const("0");
-        itv[2] = itv[1].getInterval() / itv[0].getInterval();
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        AbstractState resRSY = RSY_time(inv, phi, rs);
-        AbstractState resBilateral = Bilateral_time(inv, phi, rs);
-        AbstractState resBS = BS_time(inv, phi, rs);
-        // 0:[1,100000] 1:[1,100000] 2:[1,1]
-        assert(resRSY == resBS && resBS == resBilateral && "inconsistency occurs");
-        for (auto r : resRSY.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(1, 100000)},
-            {1, IntervalValue(1, 100000)},
-            {2, IntervalValue(1, 1)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testRelExeState4_1()
-    {
-        outs() << "test4_1 start\n";
-        AbstractState itv;
-        RelExeState relation;
-        // var0 := [0, 10];
-        relation[0] = getContext().int_const("0");
-        itv[0] = IntervalValue(0, 10);
-        // var1 := var0;
-        relation[1] =
-            getContext().int_const("1") == getContext().int_const("0");
-        itv[1] = itv[0];
-        // var2 := var1 / var0;
-        relation[2] = getContext().int_const("2") ==
-                      getContext().int_const("1") / getContext().int_const("0");
-        itv[2] = itv[1].getInterval() / itv[0].getInterval();
-        // Test extract sub vars
-        Set<u32_t> res;
-        relation.extractSubVars(relation[2], res);
-        assert(res == Set<u32_t>({0, 1, 2}) && "inconsistency occurs");
-        AbstractState inv = itv.sliceState(res);
-        RelationSolver rs;
-        const Z3Expr& relExpr = relation[2] && relation[1];
-        const Z3Expr& initExpr = rs.gamma_hat(inv);
-        const Z3Expr& phi = (relExpr && initExpr).simplify();
-        // IntervalExeState resRSY = rs.RSY(inv, phi);
-        outs() << "rsy done\n";
-        // IntervalExeState resBilateral = rs.bilateral(inv, phi);
-        outs() << "bilateral done\n";
-        AbstractState resBS = rs.BS(inv, phi);
-        outs() << "bs done\n";
-        // 0:[0,10] 1:[0,10] 2:[-00,+00]
-        // assert(resRSY == resBS && resBS == resBilateral);
-        for (auto r : resBS.getVarToVal())
-        {
-            outs() << r.first << " " << r.second.getInterval() << "\n";
-        }
-        // ground truth
-        AbstractState::VarToAbsValMap intendedRes = {{0, IntervalValue(0, 10)},
-            {1, IntervalValue(0, 10)},
-            {2, IntervalValue(0, 10)}
-        };
-        assert(resBS.eqVarToValMap(resBS.getVarToVal(), intendedRes) && "inconsistency occurs");
-    }
-
-    void testsValidation()
-    {
-        SymblicAbstractionTest saTest;
-        saTest.testRelExeState1_1();
-        saTest.testRelExeState1_2();
-
-        saTest.testRelExeState2_1();
-        saTest.testRelExeState2_2();
-        saTest.testRelExeState2_3();
-        //        saTest.testRelExeState2_4(); /// 10000
-        //        saTest.testRelExeState2_5(); /// 100000
-
-        saTest.testRelExeState3_1();
-        saTest.testRelExeState3_2();
-        //        saTest.testRelExeState3_3(); /// 10000
-        //        saTest.testRelExeState3_4(); /// 100000
-
-        outs() << "start top\n";
-        saTest.testRelExeState4_1(); /// top
-    }
-};
+        lessEqual(one, x),
+        lessEqual(x, LinearExpression(Rational(5))),
+        equal(y, x + one)
+    };
+    const auto octagon = OctagonDomain::fromConstraints(constraints);
+    const auto polyhedra = ConvexPolyhedraDomain::fromConstraints(constraints);
+    assert(octagon.bound(y - x) == Interval::singleton(Rational(1)));
+    assert(polyhedra.bound(y - x) == Interval::singleton(Rational(1)));
+    assert(octagon.bound(Variable(2)) == Interval::closed(Rational(2), Rational(6)));
+    assert(polyhedra.bound(Variable(2)) == Interval::closed(Rational(2), Rational(6)));
+}
 
 class AETest
 {
-public:
-    AETest() = default;
-
-    ~AETest() = default;
-
-    void testBoundedIntBoundaryArithmetic()
+    static Interval exact(s64_t value)
     {
-        const s64_t intMin = std::numeric_limits<s64_t>::min();
-        const s64_t intMax = std::numeric_limits<s64_t>::max();
+        return Interval::singleton(Rational(value));
+    }
 
-        const BoundedInt minValue(intMin);
-        const BoundedInt maxValue(intMax);
-        const BoundedInt zero(0);
-        const BoundedInt one(1);
-        const BoundedInt minusOne(-1);
+public:
+    void testIntegerBoundaryArithmetic()
+    {
+        const Rational smallest(std::numeric_limits<s64_t>::min());
+        const Rational largest(std::numeric_limits<s64_t>::max());
+        const Rational one(1);
+        const Rational firstWide("9223372036854775808");
 
-        // Negation.
-        assert((-minValue).is_plus_infinity());
-        assert(abs(minValue).is_plus_infinity());
-
-        // Addition: preserve exact INT64_MIN and abstract true overflow.
-        assert((minusOne + BoundedInt(-intMax)).equal(minValue));
-        assert((maxValue + one).is_plus_infinity());
-        assert((minValue + minusOne).is_minus_infinity());
-
-        // Subtraction must not negate the right-hand operand first.
-        assert((minValue - minValue).equal(zero));
-        assert((maxValue - maxValue).equal(zero));
-        assert((maxValue - minValue).is_plus_infinity());
-        assert((minValue - maxValue).is_minus_infinity());
-
-        // Multiplication: exercise both operand orders at INT64_MIN.
-        assert((one * minValue).equal(minValue));
-        assert((minValue * one).equal(minValue));
-        assert((minusOne * minValue).is_plus_infinity());
-        assert((BoundedInt::minus_infinity() * minValue).is_plus_infinity());
-
-        // Division and remainder have one overflowing finite input pair.
-        assert((minValue / one).equal(minValue));
-        assert((minValue / minusOne).is_plus_infinity());
-        assert((minValue % minusOne).equal(zero));
+        assert(-smallest == firstWide);
+        assert(largest + one == firstWide);
+        assert(smallest - one == -firstWide - one);
+        assert(smallest - smallest == Rational(0));
+        assert(smallest * Rational(-1) == firstWide);
+        assert(smallest / Rational(-1) == firstWide);
+        assert((firstWide - one).toInt64() == std::numeric_limits<s64_t>::max());
     }
 
     void testIntervalBoundaryArithmetic()
     {
-        const s64_t intMin = std::numeric_limits<s64_t>::min();
-        const s64_t intMax = std::numeric_limits<s64_t>::max();
-        const IntervalValue fullRange(intMin, intMax);
+        const Rational smallest(std::numeric_limits<s64_t>::min());
+        const Rational largest(std::numeric_limits<s64_t>::max());
+        const Rational firstWide("9223372036854775808");
+        const Rational one(1);
+        const Interval machineRange = Interval::closed(smallest, largest);
+        const Interval unit = exact(1);
 
-        // Regression for #1961:
-        // 1 - [INT64_MIN, INT64_MAX] = [INT64_MIN + 2, +inf].
-        const IntervalValue issueResult = IntervalValue(1) - fullRange;
-        const IntervalValue issueExpected(BoundedInt(intMin + 2),
-                                          BoundedInt::plus_infinity());
-        assert(issueResult.equals(issueExpected));
-
-        // Exercise the opposite subtraction direction and both overflows.
-        const IntervalValue reverseResult = fullRange - IntervalValue(1);
-        const IntervalValue reverseExpected(BoundedInt::minus_infinity(),
-                                            BoundedInt(intMax - 1));
-        assert(reverseResult.equals(reverseExpected));
-        assert((fullRange - fullRange).equals(IntervalValue::top()));
-
-        // Exact INT64_MIN results must remain finite.
-        assert((IntervalValue(-1) + IntervalValue(-intMax))
-               .equals(IntervalValue(intMin)));
-        assert((IntervalValue(1) * fullRange).equals(fullRange));
-
-        // Propagate division and remainder boundary behavior through intervals.
-        assert((IntervalValue(intMin) / IntervalValue(-1))
-               .equals(IntervalValue(BoundedInt::plus_infinity())));
-        assert((IntervalValue(intMin) % IntervalValue(-1))
-               .equals(IntervalValue(0)));
+        assert(subtract(unit, machineRange) ==
+               Interval::closed(smallest + Rational(2), firstWide + one));
+        assert(subtract(machineRange, unit) ==
+               Interval::closed(smallest - one, largest - one));
+        assert(multiply(unit, machineRange) == machineRange);
+        assert(divide(Interval::singleton(smallest), Interval::singleton(Rational(-1))) ==
+               Interval::singleton(firstWide));
+        assert(remainder(Interval::singleton(smallest), Interval::singleton(Rational(-1))).isZero());
     }
 
     void testBinaryOpStmt()
     {
-        // test division /
-        assert((IntervalValue(4) / IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() / IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() / IntervalValue(0)).equals(IntervalValue::bottom()));
-        assert((IntervalValue(4) / IntervalValue(2)).equals(IntervalValue(2)));
-        assert((IntervalValue(3) / IntervalValue(2)).equals(IntervalValue(1))); //
-        assert((IntervalValue(-3) / IntervalValue(2)).equals(IntervalValue(-1))); //
-        assert((IntervalValue(1, 3) / IntervalValue(2)).equals(IntervalValue(0, 1))); //
-        assert((IntervalValue(2, 7) / IntervalValue(2)).equals(IntervalValue(1, 3))); //
-        assert((IntervalValue(-3, 3) / IntervalValue(2)).equals(IntervalValue(-1, 1)));
-        assert((IntervalValue(-3, IntervalValue::plus_infinity()) / IntervalValue(2)).equals(IntervalValue(-1, IntervalValue::plus_infinity())));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 3) / IntervalValue(2)).equals(IntervalValue(IntervalValue::minus_infinity(), 1)));
-        assert((IntervalValue(1, 3) / IntervalValue(1, 2)).equals(IntervalValue(0, 3)));//
-        assert((IntervalValue(-3, 3) / IntervalValue(1, 2)).equals(IntervalValue(-3, 3)));
-        assert((IntervalValue(2, 7) / IntervalValue(-2, 3)).equals(IntervalValue(-7, 7))); //
-        assert((IntervalValue(-2, 7) / IntervalValue(-2, 3)).equals(IntervalValue(-7, 7))); //
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) / IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) / IntervalValue(-2, 3)).equals(IntervalValue::top()));
-
-        assert((IntervalValue(-2, 7) / IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue(-7, 7)));
-        assert((IntervalValue(-2, 7) / IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue(-7, 7)));
-        assert((IntervalValue(-6, -3) / IntervalValue(3, 9)).equals(IntervalValue(-2, 0)));
-        assert((IntervalValue(-6, 6) / IntervalValue(3, 9)).equals(IntervalValue(-2, 2)));
-
-        // test remainder %
-        assert((IntervalValue(4) % IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() % IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() % IntervalValue(0)).equals(IntervalValue::top()));
-        assert((IntervalValue(4) % IntervalValue(2)).equals(IntervalValue(0)));
-        assert((IntervalValue(3) % IntervalValue(2)).equals(IntervalValue(1)));
-        assert((IntervalValue(-3) % IntervalValue(2)).equals(IntervalValue(-1)));
-        assert((IntervalValue(1, 3) % IntervalValue(2)).equals(IntervalValue(0, 1)));
-        assert((IntervalValue(2, 7) % IntervalValue(2)).equals(IntervalValue(0, 1)));
-        assert((IntervalValue(-3, 3) % IntervalValue(2)).equals(IntervalValue(-1, 1)));
-        assert((IntervalValue(-3, IntervalValue::plus_infinity()) % IntervalValue(2)).equals(IntervalValue(-1, 1)));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 3) % IntervalValue(2)).equals(IntervalValue(-1, 1)));
-        assert((IntervalValue(1, 3) % IntervalValue(1, 2)).equals(IntervalValue(0, 1)));
-        assert((IntervalValue(-3, 3) % IntervalValue(1, 2)).equals(IntervalValue(-1, 1)));
-        assert((IntervalValue(2, 7) % IntervalValue(-2, 3)).equals(IntervalValue::top())); //
-        assert((IntervalValue(-2, 7) % IntervalValue(-2, 3)).equals(IntervalValue::top())); //
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) % IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) % IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) % IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) % IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, -3) % IntervalValue(3, 9)).equals(IntervalValue(-6, 0)));
-        assert((IntervalValue(-6, 6) % IntervalValue(3, 9)).equals(IntervalValue(-6, 6)));
-
-        // shl  <<
-        assert((IntervalValue(IntervalValue::plus_infinity()) << IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(IntervalValue::top())));
-        assert((IntervalValue(IntervalValue::plus_infinity()) << IntervalValue(2, 2)).equals(IntervalValue(IntervalValue::plus_infinity())));
-        assert((IntervalValue(IntervalValue::minus_infinity()) << IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(IntervalValue::top())));
-        assert((IntervalValue(IntervalValue::minus_infinity()) << IntervalValue(2, 2)).equals(IntervalValue(IntervalValue::minus_infinity())));
-        assert((IntervalValue(2, 2) << IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(IntervalValue::top())));
-        assert((IntervalValue(0, 0) << IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(0, 0)));
-        assert((IntervalValue(0) << IntervalValue(31)).equals(IntervalValue(0)));
-        assert((IntervalValue(0) << IntervalValue(31, 32)).equals(IntervalValue(0)));
-        assert((IntervalValue(0) << IntervalValue(-1)).equals(IntervalValue::bottom()));
-        assert((IntervalValue(0) << IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue(1) << IntervalValue(31)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, -2) << IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(IntervalValue::top())));
-        assert((IntervalValue(0, 0) << IntervalValue(2, 2)).equals(IntervalValue(0, 0)));
-        assert((IntervalValue(2, 2) << IntervalValue(3, 3)).equals(IntervalValue(16, 16)));
-        assert((IntervalValue(-2, -2) << IntervalValue(3, 3)).equals(IntervalValue(-16, -16)));
-
-        assert((IntervalValue(4) << IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() << IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() << IntervalValue(0)).equals(IntervalValue::top()));
-        assert((IntervalValue(4) << IntervalValue(2)).equals(IntervalValue(16)));
-        assert((IntervalValue(3) << IntervalValue(2)).equals(IntervalValue(12)));
-        assert((IntervalValue(-3) << IntervalValue(2)).equals(IntervalValue(-12)));
-        assert((IntervalValue(4) << IntervalValue(-2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue(1, 3) << IntervalValue(2)).equals(IntervalValue(4, 12)));
-        assert((IntervalValue(2, 7) << IntervalValue(2)).equals(IntervalValue(8, 28)));
-        assert((IntervalValue(-3, 3) << IntervalValue(2)).equals(IntervalValue(-12, 12)));
-        assert((IntervalValue(-3, IntervalValue::plus_infinity()) << IntervalValue(2)).equals(IntervalValue(-12, IntervalValue::plus_infinity())));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 3) << IntervalValue(2)).equals(IntervalValue(IntervalValue::minus_infinity(), 12)));
-        assert((IntervalValue(1, 3) << IntervalValue(1, 2)).equals(IntervalValue(2, 12)));
-        assert((IntervalValue(-3, 3) << IntervalValue(1, 2)).equals(IntervalValue(-12, 12)));
-        assert((IntervalValue(2, 7) << IntervalValue(-2, 3)).equals(IntervalValue(2, 56)));
-        assert((IntervalValue(-2, 7) << IntervalValue(-2, 3)).equals(IntervalValue(-16, 56)));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) << IntervalValue(-2, 3)).equals(IntervalValue(IntervalValue::minus_infinity(), 56)));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) << IntervalValue(-2, 3)).equals(IntervalValue(-16, IntervalValue::plus_infinity())));
-        assert((IntervalValue(-2, 7) << IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue(-16, 56)));
-        assert((IntervalValue(-2, 7) << IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, -3) << IntervalValue(3, 9)).equals(IntervalValue(-3072, -24)));
-        assert((IntervalValue(-6, 6) << IntervalValue(3, 9)).equals(IntervalValue(-3072, 3072)));
-        assert((IntervalValue(-2, 7) << IntervalValue(IntervalValue::minus_infinity(), -1)).equals(IntervalValue::bottom()));
-        assert((IntervalValue(0) << IntervalValue::top()).equals(IntervalValue(0)));
-
-
-        // shr >>
-        assert((IntervalValue(IntervalValue::plus_infinity()) >> IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(IntervalValue::plus_infinity())));
-        assert((IntervalValue(IntervalValue::plus_infinity()) >> IntervalValue(2)).equals(IntervalValue(IntervalValue::plus_infinity())));
-        assert((IntervalValue(IntervalValue::minus_infinity()) >> IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(IntervalValue::minus_infinity())));
-        assert((IntervalValue(IntervalValue::minus_infinity()) >> IntervalValue(2)).equals(IntervalValue(IntervalValue::minus_infinity())));
-        assert((IntervalValue(2) >> IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(0)));
-        assert((IntervalValue(0) >> IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(0)));
-        assert((IntervalValue(-2) >> IntervalValue(IntervalValue::plus_infinity())).equals(IntervalValue(-1)));
-        assert((IntervalValue(0) >> IntervalValue(2)).equals(IntervalValue(0)));
-        assert((IntervalValue(15) >> IntervalValue(2)).equals(IntervalValue(3)));
-        assert((IntervalValue(-15) >> IntervalValue(2)).equals(IntervalValue(-4)));
-
-        assert((IntervalValue(4) >> IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() >> IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() >> IntervalValue(0)).equals(IntervalValue::top()));
-        assert((IntervalValue(15) >> IntervalValue(2)).equals(IntervalValue(3)));
-        assert((IntervalValue(1) >> IntervalValue(2)).equals(IntervalValue(0)));
-        assert((IntervalValue(-15) >> IntervalValue(2)).equals(IntervalValue(-4)));
-        assert((IntervalValue(4) >> IntervalValue(-2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue(1, 3) >> IntervalValue(2)).equals(IntervalValue(0)));
-        assert((IntervalValue(2, 7) >> IntervalValue(2)).equals(IntervalValue(0, 1)));
-        assert((IntervalValue(-15, 15) >> IntervalValue(2)).equals(IntervalValue(-4, 3)));
-        assert((IntervalValue(-15, IntervalValue::plus_infinity()) >> IntervalValue(2)).equals(IntervalValue(-4, IntervalValue::plus_infinity())));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 15) >> IntervalValue(2)).equals(IntervalValue(IntervalValue::minus_infinity(), 3)));
-        assert((IntervalValue(0, 15) >> IntervalValue(1, 2)).equals(IntervalValue(0, 7)));
-        assert((IntervalValue(-17, 15) >> IntervalValue(1, 2)).equals(IntervalValue(-9, 7)));
-        assert((IntervalValue(2, 7) >> IntervalValue(-2, 3)).equals(IntervalValue(0, 7)));
-        assert((IntervalValue(-2, 7) >> IntervalValue(-2, 3)).equals(IntervalValue(-2, 7)));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) >> IntervalValue(-2, 3)).equals(IntervalValue(IntervalValue::minus_infinity(), 7)));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) >> IntervalValue(-2, 3)).equals(IntervalValue(-2, IntervalValue::plus_infinity())));
-        assert((IntervalValue(-2, 7) >> IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue(-2, 7)));
-        assert((IntervalValue(-2, 7) >> IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue(-2, 7)));
-        assert((IntervalValue(-6, -3) >> IntervalValue(2, 3)).equals(IntervalValue(-2, -1)));
-        assert((IntervalValue(-6, 6) >> IntervalValue(2, 3)).equals(IntervalValue(-2, 1)));
-        assert((IntervalValue(-2, 7) >> IntervalValue(IntervalValue::minus_infinity(), -1)).equals(IntervalValue::bottom()));
-        assert((IntervalValue(0) >> IntervalValue::top()).equals(IntervalValue(0)));
-
-        // and &
-        assert((IntervalValue(4) & IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() & IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() & IntervalValue(0)).equals(IntervalValue(0)));
-        assert((IntervalValue(4) & IntervalValue(2)).equals(IntervalValue(0)));
-        assert((IntervalValue(3) & IntervalValue(2)).equals(IntervalValue(2)));
-        assert((IntervalValue(-3) & IntervalValue(2)).equals(IntervalValue(0)));
-        assert((IntervalValue(1, 3) & IntervalValue(2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(2, 7) & IntervalValue(2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(-3, 3) & IntervalValue(2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(-3, IntervalValue::plus_infinity()) & IntervalValue(2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 3) & IntervalValue(2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(1, 3) & IntervalValue(1, 2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(-3, 3) & IntervalValue(1, 2)).equals(IntervalValue(0, 2)));
-        assert((IntervalValue(2, 7) & IntervalValue(-2, 3)).equals(IntervalValue(0, 7)));
-        assert((IntervalValue(-2, 7) & IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) & IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) & IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) & IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) & IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, -3) & IntervalValue(3, 9)).equals(IntervalValue(0, 9)));
-        assert((IntervalValue(-6, 6) & IntervalValue(3, 9)).equals(IntervalValue(0, 9)));
-
-        // Or |
-        assert((IntervalValue(4) | IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() | IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() | IntervalValue(-1)).equals(IntervalValue::top()));//
-        assert((IntervalValue(-1) | IntervalValue::top()).equals(IntervalValue::top()));//
-        assert((IntervalValue(4) | IntervalValue(2)).equals(IntervalValue(6)));
-        assert((IntervalValue(3) | IntervalValue(2)).equals(IntervalValue(3)));
-        assert((IntervalValue(-3) | IntervalValue(2)).equals(IntervalValue(-1)));
-        assert((IntervalValue(1, 3) | IntervalValue(2)).equals(IntervalValue(0, 3)));
-        assert((IntervalValue(2, 7) | IntervalValue(2)).equals(IntervalValue(0, 7)));
-        assert((IntervalValue(-3, 3) | IntervalValue(2)).equals(IntervalValue::top()));
-        assert((IntervalValue(-3, IntervalValue::plus_infinity()) | IntervalValue(2)).equals(IntervalValue::top()));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 3) | IntervalValue(2)).equals(IntervalValue::top()));
-        assert((IntervalValue(1, 3) | IntervalValue(1, 2)).equals(IntervalValue(0, 3)));
-        assert((IntervalValue(-3, 3) | IntervalValue(1, 2)).equals(IntervalValue::top()));
-        assert((IntervalValue(2, 7) | IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) | IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) | IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) | IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) | IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) | IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, -3) | IntervalValue(3, 9)).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, 6) | IntervalValue(3, 9)).equals(IntervalValue::top()));
-
-        // Xor ^
-        assert((IntervalValue(4) ^ IntervalValue::bottom()).equals(IntervalValue::bottom()));
-        assert((IntervalValue::bottom() ^ IntervalValue(2)).equals(IntervalValue::bottom()));
-        assert((IntervalValue::top() ^ IntervalValue(-1)).equals(IntervalValue::top()));
-        assert((IntervalValue(-1) ^ IntervalValue::top()).equals(IntervalValue::top()));
-        assert((IntervalValue(4) ^ IntervalValue(2)).equals(IntervalValue(6)));
-        assert((IntervalValue(3) ^ IntervalValue(2)).equals(IntervalValue(1)));
-        assert((IntervalValue(-3) ^ IntervalValue(2)).equals(IntervalValue(-1)));
-        assert((IntervalValue(1, 3) ^ IntervalValue(2)).equals(IntervalValue(0, 3)));
-        assert((IntervalValue(2, 7) ^ IntervalValue(2)).equals(IntervalValue(0, 7)));
-        assert((IntervalValue(-3, 3) ^ IntervalValue(2)).equals(IntervalValue::top()));
-        assert((IntervalValue(-3, IntervalValue::plus_infinity()) ^ IntervalValue(2)).equals(IntervalValue::top()));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 3) ^ IntervalValue(2)).equals(IntervalValue::top()));
-        assert((IntervalValue(1, 3) ^ IntervalValue(1, 2)).equals(IntervalValue(0, 3)));
-        assert((IntervalValue(-3, 3) ^ IntervalValue(1, 2)).equals(IntervalValue::top()));
-        assert((IntervalValue(2, 7) ^ IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) ^ IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(IntervalValue::minus_infinity(), 7) ^ IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, IntervalValue::plus_infinity()) ^ IntervalValue(-2, 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) ^ IntervalValue(IntervalValue::minus_infinity(), 3)).equals(IntervalValue::top()));
-        assert((IntervalValue(-2, 7) ^ IntervalValue(-2, IntervalValue::plus_infinity())).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, -3) ^ IntervalValue(3, 9)).equals(IntervalValue::top()));
-        assert((IntervalValue(-6, 6) ^ IntervalValue(3, 9)).equals(IntervalValue::top()));
+        assert(divide(exact(4), Interval::bottom()).isBottom());
+        assert(divide(exact(-3), exact(2)) == exact(-1));
+        assert(remainder(exact(-3), exact(2)) == exact(-1));
+        assert(shiftLeft(exact(2), exact(3)) == exact(16));
+        assert(shiftRight(exact(-15), exact(2)) == exact(-4));
+        assert(bitwiseAnd(exact(-3), exact(2)) == exact(0));
+        assert(bitwiseOr(exact(-3), exact(2)) == exact(-1));
+        assert(bitwiseXor(exact(3), exact(2)) == exact(1));
     }
 
     void testLoadAndStore()
@@ -949,15 +173,14 @@ int main(int argc, char** argv)
     delete[] arg_value;
     if (SYMABS())
     {
-        SymblicAbstractionTest saTest;
-        saTest.testsValidation();
+        testRelationalDomains();
         return 0;
     }
 
     if (AETEST())
     {
         AETest aeTest;
-        aeTest.testBoundedIntBoundaryArithmetic();
+        aeTest.testIntegerBoundaryArithmetic();
         aeTest.testIntervalBoundaryArithmetic();
         aeTest.testBinaryOpStmt();
         aeTest.testLoadAndStore();
