@@ -1,4 +1,4 @@
-//===- ConvexPolyhedraDomain.cpp -- Native relational numerical domain -------===//
+//===- PolyhedraDomain.cpp -- Native relational numerical domain ----------===//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -21,7 +21,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "AE/Core/ConvexPolyhedraDomain.h"
+#include "AE/Core/PolyhedraDomain.h"
+#include "AE/Core/BoxDomain.h"
 
 #include <cstdlib>
 #include <cassert>
@@ -553,7 +554,7 @@ void tightenIntegerRow(Inequality& inequality,
 
 } // namespace
 
-class ConvexPolyhedraDomain::Impl
+class PolyhedraDomain::Impl
 {
 public:
     mutable std::vector<Inequality> inequalities;
@@ -577,43 +578,43 @@ public:
     bool bottom = false;
 };
 
-ConvexPolyhedraDomain::ConvexPolyhedraDomain(
-    DimensionLayout layout, ConvexPolyhedraConfig config, bool bottom)
+PolyhedraDomain::PolyhedraDomain(
+    DimensionLayout layout, PolyhedraConfig config, bool bottom)
     : layout_(std::move(layout)), config_(std::move(config)),
       impl_(std::make_unique<Impl>())
 {
     impl_->bottom = bottom;
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::top(
-    const DimensionLayout& layout, const ConvexPolyhedraConfig& config)
+PolyhedraDomain PolyhedraDomain::top(
+    const DimensionLayout& layout, const PolyhedraConfig& config)
 {
-    return ConvexPolyhedraDomain(layout, config, false);
+    return PolyhedraDomain(layout, config, false);
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::bottom(
-    const DimensionLayout& layout, const ConvexPolyhedraConfig& config)
+PolyhedraDomain PolyhedraDomain::bottom(
+    const DimensionLayout& layout, const PolyhedraConfig& config)
 {
-    return ConvexPolyhedraDomain(layout, config, true);
+    return PolyhedraDomain(layout, config, true);
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::fromConstraints(
+PolyhedraDomain PolyhedraDomain::fromConstraints(
     const DimensionLayout& layout, const LinearConstraintSet& constraints,
-    const ConvexPolyhedraConfig& config)
+    const PolyhedraConfig& config)
 {
-    ConvexPolyhedraDomain result = top(layout, config);
+    PolyhedraDomain result = top(layout, config);
     result.assumeAll(constraints);
     return result;
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGeneratorsInLayout(
+PolyhedraDomain PolyhedraDomain::fromGeneratorsInLayout(
     const DimensionLayout& layout,
     const PolyhedraGeneratorSet& generators,
-    const ConvexPolyhedraConfig& config)
+    const PolyhedraConfig& config)
 {
     if (generators.empty())
     {
-        ConvexPolyhedraDomain result = bottom(layout, config);
+        PolyhedraDomain result = bottom(layout, config);
         result.recordOperation(OperationKind::GeneratorImport,
                                ApproximationKind::Exact, true);
         return result;
@@ -689,7 +690,7 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGeneratorsInLayout(
             inequality.strict = !includedBoundaryPoint;
         }
     }
-    ConvexPolyhedraDomain result = top(layout, config);
+    PolyhedraDomain result = top(layout, config);
     result.impl_->inequalities = std::move(inequalities);
     result.normalize();
     if (!result.impl_->bottom && nnc)
@@ -699,18 +700,18 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGeneratorsInLayout(
     return result;
 }
 
-ConvexPolyhedraDomain::ConvexPolyhedraDomain(
-    const ConvexPolyhedraDomain& other)
+PolyhedraDomain::PolyhedraDomain(
+    const PolyhedraDomain& other)
     : NumericalDomain(other), layout_(other.layout_),
       config_(other.config_), impl_(std::make_unique<Impl>(*other.impl_))
 {
 }
 
-ConvexPolyhedraDomain::ConvexPolyhedraDomain(
-    ConvexPolyhedraDomain&& other) noexcept = default;
+PolyhedraDomain::PolyhedraDomain(
+    PolyhedraDomain&& other) noexcept = default;
 
-ConvexPolyhedraDomain& ConvexPolyhedraDomain::operator=(
-    const ConvexPolyhedraDomain& other)
+PolyhedraDomain& PolyhedraDomain::operator=(
+    const PolyhedraDomain& other)
 {
     if (this == &other)
         return *this;
@@ -721,28 +722,28 @@ ConvexPolyhedraDomain& ConvexPolyhedraDomain::operator=(
     return *this;
 }
 
-ConvexPolyhedraDomain& ConvexPolyhedraDomain::operator=(
-    ConvexPolyhedraDomain&& other) noexcept = default;
+PolyhedraDomain& PolyhedraDomain::operator=(
+    PolyhedraDomain&& other) noexcept = default;
 
-ConvexPolyhedraDomain::~ConvexPolyhedraDomain() = default;
+PolyhedraDomain::~PolyhedraDomain() = default;
 
-std::unique_ptr<AbstractDomain> ConvexPolyhedraDomain::clone() const
+std::unique_ptr<AbstractDomain> PolyhedraDomain::clone() const
 {
-    return std::make_unique<ConvexPolyhedraDomain>(*this);
+    return std::make_unique<PolyhedraDomain>(*this);
 }
 
-const char* ConvexPolyhedraDomain::name() const
+const char* PolyhedraDomain::name() const
 {
-    return "ConvexPolyhedraDomain";
+    return "PolyhedraDomain";
 }
 
-void ConvexPolyhedraDomain::assign(
+void PolyhedraDomain::assign(
     Variable target, const LinearExpression& expression)
 {
     assignParallel({{target, expression}});
 }
 
-void ConvexPolyhedraDomain::assignParallel(
+void PolyhedraDomain::assignParallel(
     const LinearAssignmentList& assignments)
 {
     std::vector<Variable> variables;
@@ -890,13 +891,13 @@ void ConvexPolyhedraDomain::assignParallel(
     normalize();
 }
 
-void ConvexPolyhedraDomain::substitute(
+void PolyhedraDomain::substitute(
     Variable target, const LinearExpression& expression)
 {
     substituteParallel({{target, expression}});
 }
 
-void ConvexPolyhedraDomain::substituteParallel(
+void PolyhedraDomain::substituteParallel(
     const LinearAssignmentList& assignments)
 {
     std::vector<Variable> variables;
@@ -953,8 +954,8 @@ void ConvexPolyhedraDomain::substituteParallel(
     recordOperation(OperationKind::Substitution, ApproximationKind::Exact, true);
 }
 
-void ConvexPolyhedraDomain::assign(Variable target,
-                                   const TreeExpression& expression)
+void PolyhedraDomain::assign(Variable target,
+                             const TreeExpression& expression)
 {
     const std::optional<LinearExpression> linear = expression.asLinear();
     if (linear)
@@ -970,7 +971,7 @@ void ConvexPolyhedraDomain::assign(Variable target,
            false);
 }
 
-void ConvexPolyhedraDomain::assume(const LinearConstraint& constraint)
+void PolyhedraDomain::assume(const LinearConstraint& constraint)
 {
     ensureExpression(constraint.expression());
 
@@ -1073,7 +1074,7 @@ void ConvexPolyhedraDomain::assume(const LinearConstraint& constraint)
         ensureGenerators();
 }
 
-void ConvexPolyhedraDomain::assumeAll(
+void PolyhedraDomain::assumeAll(
     const LinearConstraintSet& constraints)
 {
     std::vector<Variable> variables;
@@ -1173,7 +1174,7 @@ void ConvexPolyhedraDomain::assumeAll(
         assume(disequality);
 }
 
-void ConvexPolyhedraDomain::assume(const TreeConstraint& constraint)
+void PolyhedraDomain::assume(const TreeConstraint& constraint)
 {
     const std::optional<LinearExpression> linear =
         constraint.expression().asLinear();
@@ -1193,7 +1194,7 @@ void ConvexPolyhedraDomain::assume(const TreeConstraint& constraint)
            false);
 }
 
-void ConvexPolyhedraDomain::forget(Variable variable)
+void PolyhedraDomain::forget(Variable variable)
 {
     if (!layout_.contains(variable))
         return;
@@ -1238,7 +1239,7 @@ void ConvexPolyhedraDomain::forget(Variable variable)
     normalize();
 }
 
-void ConvexPolyhedraDomain::changeLayout(const DimensionLayout& layout)
+void PolyhedraDomain::changeLayout(const DimensionLayout& layout)
 {
     if (layout_ == layout)
     {
@@ -1365,7 +1366,7 @@ void ConvexPolyhedraDomain::changeLayout(const DimensionLayout& layout)
     normalize();
 }
 
-void ConvexPolyhedraDomain::expandDimensions(
+void PolyhedraDomain::expandDimensions(
     Variable source, const std::vector<DimensionEntry>& copies)
 {
     if (!layout_.contains(source))
@@ -1446,7 +1447,7 @@ void ConvexPolyhedraDomain::expandDimensions(
     recordOperation(OperationKind::Expand, ApproximationKind::Exact, true);
 }
 
-void ConvexPolyhedraDomain::fold(
+void PolyhedraDomain::fold(
     Variable target, const std::vector<Variable>& folded)
 {
     std::vector<Variable> variables = folded;
@@ -1522,7 +1523,7 @@ void ConvexPolyhedraDomain::fold(
         }
     }
 
-    ConvexPolyhedraDomain result = top(foldedLayout, config_);
+    PolyhedraDomain result = top(foldedLayout, config_);
     result.impl_->inequalities.clear();
     result.impl_->constraintsValid = false;
     result.impl_->constraintsMinimal = false;
@@ -1541,7 +1542,7 @@ void ConvexPolyhedraDomain::fold(
     recordOperation(OperationKind::Fold, ApproximationKind::Exact, true);
 }
 
-CheckResult ConvexPolyhedraDomain::entails(
+CheckResult PolyhedraDomain::entails(
     const LinearConstraint& constraint) const
 {
     for (const auto& term : constraint.expression().terms())
@@ -1593,7 +1594,7 @@ CheckResult ConvexPolyhedraDomain::entails(
            : CheckResult::Unknown;
 }
 
-Interval ConvexPolyhedraDomain::bound(Variable variable) const
+Interval PolyhedraDomain::bound(Variable variable) const
 {
     if (isBottom())
         return Interval::bottom();
@@ -1651,7 +1652,7 @@ Interval ConvexPolyhedraDomain::bound(Variable variable) const
     return Interval(lower, upper);
 }
 
-Interval ConvexPolyhedraDomain::bound(
+Interval PolyhedraDomain::bound(
     const LinearExpression& expression) const
 {
     if (isBottom())
@@ -1733,7 +1734,7 @@ Interval ConvexPolyhedraDomain::bound(
     return Interval(lower, upper);
 }
 
-LinearConstraintSet ConvexPolyhedraDomain::toConstraints() const
+LinearConstraintSet PolyhedraDomain::toConstraints() const
 {
     LinearConstraintSet result;
     if (impl_->bottom)
@@ -1749,7 +1750,7 @@ LinearConstraintSet ConvexPolyhedraDomain::toConstraints() const
     return result;
 }
 
-PolyhedraGeneratorSet ConvexPolyhedraDomain::toGenerators() const
+PolyhedraGeneratorSet PolyhedraDomain::toGenerators() const
 {
     PolyhedraGeneratorSet result;
     if (impl_->bottom)
@@ -1791,7 +1792,7 @@ PolyhedraGeneratorSet ConvexPolyhedraDomain::toGenerators() const
     return result;
 }
 
-void ConvexPolyhedraDomain::close()
+void PolyhedraDomain::close()
 {
     recordOperation(OperationKind::TopologicalClosure,
                     ApproximationKind::Exact, true);
@@ -1803,7 +1804,7 @@ void ConvexPolyhedraDomain::close()
     normalize();
 }
 
-void ConvexPolyhedraDomain::canonicalize()
+void PolyhedraDomain::canonicalize()
 {
     if (impl_->constraintsValid && impl_->constraintsMinimal)
     {
@@ -1816,8 +1817,8 @@ void ConvexPolyhedraDomain::canonicalize()
                     ApproximationKind::Exact, true);
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::join(
-    const ConvexPolyhedraDomain& other) const
+PolyhedraDomain PolyhedraDomain::join(
+    const PolyhedraDomain& other) const
 {
     requireCompatible(other);
     if (layout_ != other.layout_)
@@ -1833,14 +1834,14 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::join(
     requirePolyhedron(other);
     if (impl_->bottom)
     {
-        ConvexPolyhedraDomain result(other);
+        PolyhedraDomain result(other);
         result.recordOperation(OperationKind::Join,
                                ApproximationKind::Exact, true);
         return result;
     }
     if (other.impl_->bottom)
     {
-        ConvexPolyhedraDomain result(*this);
+        PolyhedraDomain result(*this);
         result.recordOperation(OperationKind::Join,
                                ApproximationKind::Exact, true);
         return result;
@@ -1857,7 +1858,7 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::join(
     // inclusion test here: it costs constraint-by-generator products on every
     // join and any interior generators are removed by the one deferred DD
     // materialization. Keep a sorted primitive union throughout a join chain.
-    ConvexPolyhedraDomain result = top(layout_, config_);
+    PolyhedraDomain result = top(layout_, config_);
     const bool resultNNC =
         impl_->generatorsNNC || other.impl_->generatorsNNC;
     const auto promote = [resultNNC](const std::vector<Generator>& source,
@@ -1903,8 +1904,8 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::join(
     return result;
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::meet(
-    const ConvexPolyhedraDomain& other) const
+PolyhedraDomain PolyhedraDomain::meet(
+    const PolyhedraDomain& other) const
 {
     requireCompatible(other);
     if (layout_ != other.layout_)
@@ -1917,15 +1918,15 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::meet(
         return left.meet(right);
     }
 
-    ConvexPolyhedraDomain result(*this);
+    PolyhedraDomain result(*this);
     result.meetDomain(other);
     result.recordOperation(OperationKind::Meet, ApproximationKind::Exact,
                            true);
     return result;
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::widen(
-    const ConvexPolyhedraDomain& next, const WideningPolicy& policy) const
+PolyhedraDomain PolyhedraDomain::widen(
+    const PolyhedraDomain& next, const WideningPolicy& policy) const
 {
     requireCompatible(next);
     if (layout_ != next.layout_)
@@ -1941,7 +1942,7 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::widen(
     requirePolyhedron(next);
     if (impl_->bottom)
     {
-        ConvexPolyhedraDomain result(next);
+        PolyhedraDomain result(next);
         result.recordOperation(OperationKind::Widening,
                                ApproximationKind::SoundOverApproximation,
                                true);
@@ -1949,7 +1950,7 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::widen(
     }
     if (next.impl_->bottom)
     {
-        ConvexPolyhedraDomain result(*this);
+        PolyhedraDomain result(*this);
         result.recordOperation(OperationKind::Widening,
                                ApproximationKind::SoundOverApproximation,
                                true);
@@ -1957,7 +1958,7 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::widen(
     }
     ensureConstraints();
     next.ensureConstraints();
-    ConvexPolyhedraDomain result = top(layout_, config_);
+    PolyhedraDomain result = top(layout_, config_);
     for (const Inequality& inequality : impl_->inequalities)
     {
         if (entailsInequality(next.impl_->inequalities, layout_.size(),
@@ -1992,8 +1993,8 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::widen(
     return result;
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::narrow(
-    const ConvexPolyhedraDomain& next) const
+PolyhedraDomain PolyhedraDomain::narrow(
+    const PolyhedraDomain& next) const
 {
     requireCompatible(next);
     if (layout_ != next.layout_)
@@ -2011,23 +2012,23 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::narrow(
         assert(false && "narrowing requires next to be included in current");
         std::abort();
     }
-    ConvexPolyhedraDomain result = meet(next);
+    PolyhedraDomain result = meet(next);
     result.recordOperation(OperationKind::Narrowing,
                            ApproximationKind::Exact, true);
     return result;
 }
 
-bool ConvexPolyhedraDomain::hasCompatibleDomain(
+bool PolyhedraDomain::hasCompatibleDomain(
     const AbstractDomain& other) const
 {
-    const auto* polyhedron = other.isDomain<ConvexPolyhedraDomain>()
-                             ? &static_cast<const ConvexPolyhedraDomain&>(other)
+    const auto* polyhedron = other.isDomain<PolyhedraDomain>()
+                             ? &static_cast<const PolyhedraDomain&>(other)
                              : nullptr;
     return polyhedron &&
            config_.operationCompatible(polyhedron->config_);
 }
 
-void ConvexPolyhedraDomain::joinDomain(const AbstractDomain& other)
+void PolyhedraDomain::joinDomain(const AbstractDomain& other)
 {
     const auto& alignedOperand = requirePolyhedron(other);
     if (layout_ != alignedOperand.layout_)
@@ -2039,7 +2040,7 @@ void ConvexPolyhedraDomain::joinDomain(const AbstractDomain& other)
     *this = join(requirePolyhedron(other));
 }
 
-void ConvexPolyhedraDomain::meetDomain(const AbstractDomain& other)
+void PolyhedraDomain::meetDomain(const AbstractDomain& other)
 {
     if (this == &other)
     {
@@ -2053,7 +2054,7 @@ void ConvexPolyhedraDomain::meetDomain(const AbstractDomain& other)
         return;
     }
 
-    const ConvexPolyhedraDomain& polyhedron = requirePolyhedron(other);
+    const PolyhedraDomain& polyhedron = requirePolyhedron(other);
     if (impl_->bottom || polyhedron.impl_->bottom)
     {
         impl_->bottom = true;
@@ -2197,7 +2198,7 @@ void ConvexPolyhedraDomain::meetDomain(const AbstractDomain& other)
     normalize();
 }
 
-void ConvexPolyhedraDomain::widenDomain(const AbstractDomain& next)
+void PolyhedraDomain::widenDomain(const AbstractDomain& next)
 {
     const auto& alignedOperand = requirePolyhedron(next);
     if (layout_ != alignedOperand.layout_)
@@ -2209,7 +2210,7 @@ void ConvexPolyhedraDomain::widenDomain(const AbstractDomain& next)
     *this = widen(requirePolyhedron(next));
 }
 
-void ConvexPolyhedraDomain::narrowDomain(const AbstractDomain& next)
+void PolyhedraDomain::narrowDomain(const AbstractDomain& next)
 {
     const auto& alignedOperand = requirePolyhedron(next);
     if (layout_ != alignedOperand.layout_)
@@ -2221,18 +2222,18 @@ void ConvexPolyhedraDomain::narrowDomain(const AbstractDomain& next)
     *this = narrow(requirePolyhedron(next));
 }
 
-bool ConvexPolyhedraDomain::isBottomDomain() const
+bool PolyhedraDomain::isBottomDomain() const
 {
     return impl_->bottom;
 }
 
-bool ConvexPolyhedraDomain::isTopDomain() const
+bool PolyhedraDomain::isTopDomain() const
 {
     ensureConstraints();
     return !impl_->bottom && impl_->inequalities.empty();
 }
 
-bool ConvexPolyhedraDomain::leqDomain(const AbstractDomain& other) const
+bool PolyhedraDomain::leqDomain(const AbstractDomain& other) const
 {
     const auto& rhs = requirePolyhedron(other);
     requireCompatible(rhs);
@@ -2246,7 +2247,7 @@ bool ConvexPolyhedraDomain::leqDomain(const AbstractDomain& other) const
         return left.leqDomain(right);
     }
 
-    const ConvexPolyhedraDomain& polyhedron = requirePolyhedron(other);
+    const PolyhedraDomain& polyhedron = requirePolyhedron(other);
     if (impl_->bottom)
         return true;
     if (polyhedron.impl_->bottom)
@@ -2274,7 +2275,7 @@ bool ConvexPolyhedraDomain::leqDomain(const AbstractDomain& other) const
     });
 }
 
-std::string ConvexPolyhedraDomain::domainToString() const
+std::string PolyhedraDomain::domainToString() const
 {
     if (impl_->bottom)
         return "bottom";
@@ -2292,14 +2293,14 @@ std::string ConvexPolyhedraDomain::domainToString() const
     return output.str();
 }
 
-const ConvexPolyhedraDomain& ConvexPolyhedraDomain::requirePolyhedron(
+const PolyhedraDomain& PolyhedraDomain::requirePolyhedron(
     const AbstractDomain& other) const
 {
     requireCompatible(other);
-    return static_cast<const ConvexPolyhedraDomain&>(other);
+    return static_cast<const PolyhedraDomain&>(other);
 }
 
-void ConvexPolyhedraDomain::ensureConstraints() const
+void PolyhedraDomain::ensureConstraints() const
 {
     if (impl_->bottom || impl_->constraintsValid)
         return;
@@ -2368,7 +2369,7 @@ void ConvexPolyhedraDomain::ensureConstraints() const
     {
         // This should only be reachable for a malformed internal V cache.  Be
         // fail-closed instead of publishing an inconsistent pair of caches.
-        auto* self = const_cast<ConvexPolyhedraDomain*>(this);
+        auto* self = const_cast<PolyhedraDomain*>(this);
         self->impl_->bottom = true;
         self->impl_->inequalities.clear();
         self->impl_->generators.clear();
@@ -2410,7 +2411,7 @@ void ConvexPolyhedraDomain::ensureConstraints() const
     }
 }
 
-void ConvexPolyhedraDomain::ensureGenerators() const
+void PolyhedraDomain::ensureGenerators() const
 {
     if (impl_->bottom || impl_->generatorsValid)
         return;
@@ -2422,7 +2423,7 @@ void ConvexPolyhedraDomain::ensureGenerators() const
     impl_->generatorConstraints = std::move(system.constraints);
     if (impl_->generators.empty())
     {
-        auto* self = const_cast<ConvexPolyhedraDomain*>(this);
+        auto* self = const_cast<PolyhedraDomain*>(this);
         self->impl_->bottom = true;
         self->impl_->inequalities.clear();
         self->impl_->generatorConstraints.clear();
@@ -2443,7 +2444,7 @@ void ConvexPolyhedraDomain::ensureGenerators() const
     impl_->polarValid = true;
 }
 
-void ConvexPolyhedraDomain::invalidateConstraints()
+void PolyhedraDomain::invalidateConstraints()
 {
     if (!impl_->generatorsValid || !impl_->generatorsExact)
     {
@@ -2455,7 +2456,7 @@ void ConvexPolyhedraDomain::invalidateConstraints()
     impl_->constraintsMinimal = false;
 }
 
-void ConvexPolyhedraDomain::invalidateGenerators()
+void PolyhedraDomain::invalidateGenerators()
 {
     impl_->generators.clear();
     impl_->generatorConstraints.clear();
@@ -2467,7 +2468,7 @@ void ConvexPolyhedraDomain::invalidateGenerators()
     impl_->polarValid = false;
 }
 
-void ConvexPolyhedraDomain::normalize()
+void PolyhedraDomain::normalize()
 {
     ensureConstraints();
     invalidateGenerators();
@@ -2504,9 +2505,9 @@ void ConvexPolyhedraDomain::normalize()
     impl_->constraintsMinimal = true;
 }
 
-void ConvexPolyhedraDomain::report(OperationKind operation,
-                                   ApproximationKind approximation,
-                                   std::string reason, bool best) const
+void PolyhedraDomain::report(OperationKind operation,
+                             ApproximationKind approximation,
+                             std::string reason, bool best) const
 {
     recordOperation(operation, approximation, best, reason);
     if (config_.diagnostics)
@@ -4016,29 +4017,29 @@ std::vector<Inequality> constraintsFromGenerators(
 
 } // namespace
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::top(const ConvexPolyhedraConfig& config)
+PolyhedraDomain PolyhedraDomain::top(const PolyhedraConfig& config)
 {
     return top(DimensionLayout(), config);
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::bottom(const ConvexPolyhedraConfig& config)
+PolyhedraDomain PolyhedraDomain::bottom(const PolyhedraConfig& config)
 {
     return bottom(DimensionLayout(), config);
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::fromConstraints(const LinearConstraintSet& constraints, const ConvexPolyhedraConfig& config)
+PolyhedraDomain PolyhedraDomain::fromConstraints(const LinearConstraintSet& constraints, const PolyhedraConfig& config)
 {
     auto result = top(config);
     result.assumeAll(constraints);
     return result;
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::fromBox(const BoxDomain& box, const ConvexPolyhedraConfig& config)
+PolyhedraDomain PolyhedraDomain::fromBox(const BoxDomain& box, const PolyhedraConfig& config)
 {
     return box.isBottom() ? bottom(config) : fromConstraints(box.toConstraints(), config);
 }
 
-BoxDomain ConvexPolyhedraDomain::toBox() const
+BoxDomain PolyhedraDomain::toBox() const
 {
     BoxSemanticConfig options;
     options.integerTightening = config().integerTightening;
@@ -4060,7 +4061,7 @@ BoxDomain ConvexPolyhedraDomain::toBox() const
     return result;
 }
 
-std::vector<Variable> ConvexPolyhedraDomain::supportVariables() const
+std::vector<Variable> PolyhedraDomain::supportVariables() const
 {
     std::vector<Variable> result;
     result.reserve(layout_.size());
@@ -4069,7 +4070,7 @@ std::vector<Variable> ConvexPolyhedraDomain::supportVariables() const
     return result;
 }
 
-void ConvexPolyhedraDomain::ensureVariables(const std::vector<Variable>& variables)
+void PolyhedraDomain::ensureVariables(const std::vector<Variable>& variables)
 {
     std::set<Variable> missing;
     for (Variable variable : variables)
@@ -4083,7 +4084,7 @@ void ConvexPolyhedraDomain::ensureVariables(const std::vector<Variable>& variabl
     changeLayout(layout_.add(added));
 }
 
-void ConvexPolyhedraDomain::ensureExpression(const LinearExpression& expression)
+void PolyhedraDomain::ensureExpression(const LinearExpression& expression)
 {
     std::vector<Variable> variables;
     for (const auto& term : expression.terms())
@@ -4091,7 +4092,7 @@ void ConvexPolyhedraDomain::ensureExpression(const LinearExpression& expression)
     ensureVariables(variables);
 }
 
-void ConvexPolyhedraDomain::project(const std::vector<Variable>& retained)
+void PolyhedraDomain::project(const std::vector<Variable>& retained)
 {
     std::set<Variable> keep(retained.begin(), retained.end());
     std::vector<Variable> removed;
@@ -4102,7 +4103,7 @@ void ConvexPolyhedraDomain::project(const std::vector<Variable>& retained)
     recordOperation(OperationKind::Forget, ApproximationKind::Exact, true);
 }
 
-void ConvexPolyhedraDomain::expand(Variable source, const std::vector<Variable>& copies)
+void PolyhedraDomain::expand(Variable source, const std::vector<Variable>& copies)
 {
     std::set<Variable> seen;
     for (Variable variable : copies)
@@ -4121,9 +4122,9 @@ void ConvexPolyhedraDomain::expand(Variable source, const std::vector<Variable>&
     expandDimensions(source, added);
 }
 
-ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGenerators(
+PolyhedraDomain PolyhedraDomain::fromGenerators(
     const std::vector<Variable>& variables, const PolyhedraGeneratorSet& generators,
-    const ConvexPolyhedraConfig& config)
+    const PolyhedraConfig& config)
 {
     std::vector<DimensionEntry> entries;
     for (Variable variable : variables)
@@ -4144,7 +4145,7 @@ ConvexPolyhedraDomain ConvexPolyhedraDomain::fromGenerators(
     return fromGeneratorsInLayout(layout, ordered, config);
 }
 
-PolyhedraGeneratorSet ConvexPolyhedraDomain::toGenerators(
+PolyhedraGeneratorSet PolyhedraDomain::toGenerators(
     const std::vector<Variable>& variables) const
 {
     std::vector<DimensionEntry> entries;

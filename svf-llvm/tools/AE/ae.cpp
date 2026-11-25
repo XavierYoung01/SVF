@@ -32,7 +32,7 @@
 #include "WPA/Andersen.h"
 
 #include "AE/Core/BoxAddressDomain.h"
-#include "AE/Core/ConvexPolyhedraDomain.h"
+#include "AE/Core/PolyhedraDomain.h"
 #include "AE/Core/OctagonDomain.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
 #include <limits>
@@ -65,7 +65,7 @@ static void testRelationalDomains()
         equal(y, x + one)
     };
     const auto octagon = OctagonDomain::fromConstraints(constraints);
-    const auto polyhedra = ConvexPolyhedraDomain::fromConstraints(constraints);
+    const auto polyhedra = PolyhedraDomain::fromConstraints(constraints);
     assert(octagon.bound(y - x) == Interval::singleton(Rational(1)));
     assert(polyhedra.bound(y - x) == Interval::singleton(Rational(1)));
     assert(octagon.bound(Variable(2)) == Interval::closed(Rational(2), Rational(6)));

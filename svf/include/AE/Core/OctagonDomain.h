@@ -24,13 +24,16 @@
 #ifndef SVF_AE_OCTAGON_DOMAIN_H
 #define SVF_AE_OCTAGON_DOMAIN_H
 
-#include "AE/Core/BoxDomain.h"
+#include "AE/Core/NumericalDomain.h"
 
 #include <memory>
 #include <string>
 
 namespace SVF
 {
+
+class BoxDomain;
+
 /// Selects the physical carrier of an Octagon DBM.  This is deliberately not
 /// part of the abstract semantics: states using different carriers may be
 /// combined, compared, and converted without approximation.

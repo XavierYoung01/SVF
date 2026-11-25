@@ -151,7 +151,7 @@ enum class DomainKind
     Product,
     Initialization,
     Octagon,
-    ConvexPolyhedra
+    Polyhedra
 };
 
 const char* toString(CheckResult result);

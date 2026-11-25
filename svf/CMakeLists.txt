@@ -2,12 +2,13 @@
 # these sources includes SVF IR or LLVM headers.
 set(ABSTRACT_DOMAIN_CORE_HEADERS
     ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/AbstractDomain.h
+    ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/NumericValue.h
     ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/NumericalDomain.h
     ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/AddressDomain.h
     ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/BoxAddressDomain.h
     ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/BoxDomain.h
     ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/OctagonDomain.h
-    ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/ConvexPolyhedraDomain.h
+    ${CMAKE_CURRENT_LIST_DIR}/include/AE/Core/PolyhedraDomain.h
 )
 set(ABSTRACT_DOMAIN_CORE_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/lib/AE/Core/AbstractDomain.cpp
@@ -16,7 +17,7 @@ set(ABSTRACT_DOMAIN_CORE_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/lib/AE/Core/BoxDomain.cpp
     ${CMAKE_CURRENT_LIST_DIR}/lib/AE/Core/NumericalDomain.cpp
     ${CMAKE_CURRENT_LIST_DIR}/lib/AE/Core/OctagonDomain.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/lib/AE/Core/ConvexPolyhedraDomain.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lib/AE/Core/PolyhedraDomain.cpp
 )
 add_library(AbstractDomainCore)
 add_library(SVF::AbstractDomainCore ALIAS AbstractDomainCore)

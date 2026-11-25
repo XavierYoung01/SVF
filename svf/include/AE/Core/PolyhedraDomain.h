@@ -1,4 +1,4 @@
-//===- ConvexPolyhedraDomain.h -- Native relational numerical domain -*- C++ -*-===//
+//===- PolyhedraDomain.h -- Native relational numerical domain -*- C++ -*-===//
 //
 //                     SVF: Static Value-Flow Analysis
 //
@@ -21,22 +21,25 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
-#define SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
+#ifndef SVF_AE_POLYHEDRA_DOMAIN_H
+#define SVF_AE_POLYHEDRA_DOMAIN_H
 
-#include "AE/Core/BoxDomain.h"
+#include "AE/Core/NumericalDomain.h"
 
 #include <memory>
 #include <vector>
 
 namespace SVF
 {
-struct ConvexPolyhedraConfig
+
+class BoxDomain;
+
+struct PolyhedraConfig
 {
     std::shared_ptr<DiagnosticSink> diagnostics;
     bool integerTightening = true;
 
-    bool operationCompatible(const ConvexPolyhedraConfig& other) const
+    bool operationCompatible(const PolyhedraConfig& other) const
     {
         return integerTightening == other.integerTightening;
     }
@@ -67,7 +70,7 @@ using PolyhedraGeneratorSet = std::vector<PolyhedraGenerator>;
 /// Operations select the cheaper valid side without exposing H/V state to the
 /// abstract interpreter; exact Fourier-Motzkin remains the NNC projection
 /// fallback.
-class ConvexPolyhedraDomain final : public NumericalDomain
+class PolyhedraDomain final : public NumericalDomain
 {
 public:
     using NumericalDomain::assignParallel;
@@ -75,32 +78,32 @@ public:
     using NumericalDomain::substitute;
     using NumericalDomain::substituteParallel;
 
-    static ConvexPolyhedraDomain top(const ConvexPolyhedraConfig& config = {});
-    static ConvexPolyhedraDomain bottom(const ConvexPolyhedraConfig& config = {});
-    static ConvexPolyhedraDomain fromConstraints(const LinearConstraintSet& constraints,
-            const ConvexPolyhedraConfig& config = {});
-    static ConvexPolyhedraDomain fromBox(const BoxDomain& box, const ConvexPolyhedraConfig& config = {});
+    static PolyhedraDomain top(const PolyhedraConfig& config = {});
+    static PolyhedraDomain bottom(const PolyhedraConfig& config = {});
+    static PolyhedraDomain fromConstraints(const LinearConstraintSet& constraints,
+                                           const PolyhedraConfig& config = {});
+    static PolyhedraDomain fromBox(const BoxDomain& box, const PolyhedraConfig& config = {});
     DomainKind kind() const noexcept override
     {
-        return DomainKind::ConvexPolyhedra;
+        return DomainKind::Polyhedra;
     }
     BoxDomain toBox() const;
     /// Existential projection: omitted variables become unrestricted.
     void project(const std::vector<Variable>& retained) override;
     /// Generator coordinates use exactly the caller-supplied variable order.
-    static ConvexPolyhedraDomain fromGenerators(const std::vector<Variable>& variables,
-            const PolyhedraGeneratorSet& generators, const ConvexPolyhedraConfig& config = {});
+    static PolyhedraDomain fromGenerators(const std::vector<Variable>& variables,
+                                          const PolyhedraGeneratorSet& generators, const PolyhedraConfig& config = {});
     PolyhedraGeneratorSet toGenerators(const std::vector<Variable>& variables) const;
-    ConvexPolyhedraDomain(const ConvexPolyhedraDomain& other);
-    ConvexPolyhedraDomain(ConvexPolyhedraDomain&& other) noexcept;
-    ConvexPolyhedraDomain& operator=(const ConvexPolyhedraDomain& other);
-    ConvexPolyhedraDomain& operator=(ConvexPolyhedraDomain&& other) noexcept;
-    ~ConvexPolyhedraDomain() override;
+    PolyhedraDomain(const PolyhedraDomain& other);
+    PolyhedraDomain(PolyhedraDomain&& other) noexcept;
+    PolyhedraDomain& operator=(const PolyhedraDomain& other);
+    PolyhedraDomain& operator=(PolyhedraDomain&& other) noexcept;
+    ~PolyhedraDomain() override;
 
     std::unique_ptr<AbstractDomain> clone() const override;
     const char* name() const;
 
-    const ConvexPolyhedraConfig& config() const
+    const PolyhedraConfig& config() const
     {
         return config_;
     }
@@ -130,31 +133,31 @@ public:
     void close() override;
     void canonicalize() override;
 
-    ConvexPolyhedraDomain join(
-        const ConvexPolyhedraDomain& other) const;
-    ConvexPolyhedraDomain meet(
-        const ConvexPolyhedraDomain& other) const;
-    ConvexPolyhedraDomain widen(
-        const ConvexPolyhedraDomain& next,
+    PolyhedraDomain join(
+        const PolyhedraDomain& other) const;
+    PolyhedraDomain meet(
+        const PolyhedraDomain& other) const;
+    PolyhedraDomain widen(
+        const PolyhedraDomain& next,
         const WideningPolicy& policy = {}) const;
-    ConvexPolyhedraDomain narrow(
-        const ConvexPolyhedraDomain& next) const;
+    PolyhedraDomain narrow(
+        const PolyhedraDomain& next) const;
 
 private:
-    static ConvexPolyhedraDomain top(
+    static PolyhedraDomain top(
         const DimensionLayout& layout,
-        const ConvexPolyhedraConfig& config);
-    static ConvexPolyhedraDomain bottom(
+        const PolyhedraConfig& config);
+    static PolyhedraDomain bottom(
         const DimensionLayout& layout,
-        const ConvexPolyhedraConfig& config);
-    static ConvexPolyhedraDomain fromConstraints(
+        const PolyhedraConfig& config);
+    static PolyhedraDomain fromConstraints(
         const DimensionLayout& layout,
         const LinearConstraintSet& constraints,
-        const ConvexPolyhedraConfig& config);
-    static ConvexPolyhedraDomain fromGeneratorsInLayout(
+        const PolyhedraConfig& config);
+    static PolyhedraDomain fromGeneratorsInLayout(
         const DimensionLayout& layout,
         const PolyhedraGeneratorSet& generators,
-        const ConvexPolyhedraConfig& config);
+        const PolyhedraConfig& config);
 
     const DimensionLayout& layout() const
     {
@@ -166,12 +169,12 @@ private:
     void expandDimensions(Variable source, const std::vector<DimensionEntry>& copies);
     PolyhedraGeneratorSet toGenerators() const;
     class Impl;
-    ConvexPolyhedraDomain(DimensionLayout layout,
-                          ConvexPolyhedraConfig config, bool bottom);
+    PolyhedraDomain(DimensionLayout layout,
+                    PolyhedraConfig config, bool bottom);
 
     const void* dynamicTypeToken() const noexcept override
     {
-        return staticTypeToken<ConvexPolyhedraDomain>();
+        return staticTypeToken<PolyhedraDomain>();
     }
     bool hasCompatibleDomain(const AbstractDomain& other) const override;
     void joinDomain(const AbstractDomain& other) override;
@@ -183,7 +186,7 @@ private:
     bool leqDomain(const AbstractDomain& other) const override;
     std::string domainToString() const override;
 
-    const ConvexPolyhedraDomain& requirePolyhedron(
+    const PolyhedraDomain& requirePolyhedron(
         const AbstractDomain& other) const;
     void ensureConstraints() const;
     void ensureGenerators() const;
@@ -194,10 +197,10 @@ private:
                 std::string reason, bool best = true) const;
 
     DimensionLayout layout_;
-    ConvexPolyhedraConfig config_;
+    PolyhedraConfig config_;
     std::unique_ptr<Impl> impl_;
 };
 
 } // namespace SVF
 
-#endif // SVF_AE_CONVEX_POLYHEDRA_DOMAIN_H
+#endif // SVF_AE_POLYHEDRA_DOMAIN_H

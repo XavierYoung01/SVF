@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "AE/Core/OctagonDomain.h"
+#include "AE/Core/BoxDomain.h"
 
 #include <cstdlib>
 #include <cassert>

@@ -20,8 +20,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef SVF_AE_CHECKED_INT64_H
-#define SVF_AE_CHECKED_INT64_H
+#ifndef SVF_CHECKED_INT64_H
+#define SVF_CHECKED_INT64_H
 
 #include <cstdint>
 #include <limits>
@@ -87,4 +87,4 @@ struct CheckedInt64
 
 } // namespace SVF
 
-#endif // SVF_AE_CHECKED_INT64_H
+#endif // SVF_CHECKED_INT64_H
