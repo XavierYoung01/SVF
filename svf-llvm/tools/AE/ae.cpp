@@ -25,131 +25,20 @@
  //
  // Author: Jiawei Wang, Xiao Cheng, Jiawei Yang, Jiawei Ren, Yulei Sui
  */
+#include "AETestDriver.h"
+
 #include "SVF-LLVM/PAGBuilder.h"
 #include "WPA/WPAPass.h"
 #include "Util/CommandLine.h"
 #include "Util/Options.h"
 #include "WPA/Andersen.h"
 
-#include "AE/Core/BoxAddressDomain.h"
-#include "AE/Core/PolyhedraDomain.h"
-#include "AE/Core/OctagonDomain.h"
 #include "AE/Svfexe/AbstractInterpretation.h"
-#include <limits>
+
+#include <cassert>
 
 using namespace SVF;
 using namespace SVFUtil;
-
-
-static Option<bool> SYMABS(
-    "symabs",
-    "relational abstract domain test",
-    false
-);
-
-static Option<bool> AETEST(
-    "aetest",
-    "abstract execution basic function test",
-    false
-);
-
-static void testRelationalDomains()
-{
-    const LinearExpression x(Variable(1));
-    const LinearExpression y(Variable(2));
-    const LinearExpression one(Rational(1));
-    const LinearConstraintSet constraints
-    {
-        lessEqual(one, x),
-        lessEqual(x, LinearExpression(Rational(5))),
-        equal(y, x + one)
-    };
-    const auto octagon = OctagonDomain::fromConstraints(constraints);
-    const auto polyhedra = PolyhedraDomain::fromConstraints(constraints);
-    assert(octagon.bound(y - x) == Interval::singleton(Rational(1)));
-    assert(polyhedra.bound(y - x) == Interval::singleton(Rational(1)));
-    assert(octagon.bound(Variable(2)) == Interval::closed(Rational(2), Rational(6)));
-    assert(polyhedra.bound(Variable(2)) == Interval::closed(Rational(2), Rational(6)));
-}
-
-class AETest
-{
-    static Interval exact(s64_t value)
-    {
-        return Interval::singleton(Rational(value));
-    }
-
-public:
-    void testIntegerBoundaryArithmetic()
-    {
-        const Rational smallest(std::numeric_limits<s64_t>::min());
-        const Rational largest(std::numeric_limits<s64_t>::max());
-        const Rational one(1);
-        const Rational firstWide("9223372036854775808");
-
-        assert(-smallest == firstWide);
-        assert(largest + one == firstWide);
-        assert(smallest - one == -firstWide - one);
-        assert(smallest - smallest == Rational(0));
-        assert(smallest * Rational(-1) == firstWide);
-        assert(smallest / Rational(-1) == firstWide);
-        assert((firstWide - one).toInt64() == std::numeric_limits<s64_t>::max());
-    }
-
-    void testIntervalBoundaryArithmetic()
-    {
-        const Rational smallest(std::numeric_limits<s64_t>::min());
-        const Rational largest(std::numeric_limits<s64_t>::max());
-        const Rational firstWide("9223372036854775808");
-        const Rational one(1);
-        const Interval machineRange = Interval::closed(smallest, largest);
-        const Interval unit = exact(1);
-
-        assert(subtract(unit, machineRange) ==
-               Interval::closed(smallest + Rational(2), firstWide + one));
-        assert(subtract(machineRange, unit) ==
-               Interval::closed(smallest - one, largest - one));
-        assert(multiply(unit, machineRange) == machineRange);
-        assert(divide(Interval::singleton(smallest), Interval::singleton(Rational(-1))) ==
-               Interval::singleton(firstWide));
-        assert(remainder(Interval::singleton(smallest), Interval::singleton(Rational(-1))).isZero());
-    }
-
-    void testBinaryOpStmt()
-    {
-        assert(divide(exact(4), Interval::bottom()).isBottom());
-        assert(divide(exact(-3), exact(2)) == exact(-1));
-        assert(remainder(exact(-3), exact(2)) == exact(-1));
-        assert(shiftLeft(exact(2), exact(3)) == exact(16));
-        assert(shiftRight(exact(-15), exact(2)) == exact(-4));
-        assert(bitwiseAnd(exact(-3), exact(2)) == exact(0));
-        assert(bitwiseOr(exact(-3), exact(2)) == exact(-1));
-        assert(bitwiseXor(exact(3), exact(2)) == exact(1));
-    }
-
-    void testLoadAndStore()
-    {
-        const Variable sourceA(1), sourceB(2), pointerA(3), pointerB(4);
-        const Variable contentA(7, NumericType::integer(), Variable::Role::ObjectContent);
-        const Variable contentB(8, NumericType::integer(), Variable::Role::ObjectContent);
-        const Location cellA(7), cellB(8);
-        const Interval intervalA = Interval::closed(Rational(1), Rational(3));
-        const Interval intervalB = Interval::closed(Rational(2), Rational(7));
-        BoxAddressDomain state(BoxDomain::top(), MemoryLayout({{cellA, contentA},
-            {cellB, contentB}}));
-        state.setInterval(sourceA, intervalA);
-        state.setInterval(sourceB, intervalB);
-        state.setAddressSet(pointerA, AddressSet::singleton(cellA));
-        state.setAddressSet(pointerB, AddressSet::singleton(cellB));
-        state.assignMemory(cellA, sourceA);
-        state.assignMemory(cellB, sourceB);
-        state.load(Variable(5), pointerA);
-        state.load(Variable(6), pointerB);
-        assert(state.interval(Variable(5)) == intervalA);
-        assert(state.interval(Variable(6)) == intervalB);
-    }
-};
-
 
 int main(int argc, char** argv)
 {
@@ -171,21 +60,8 @@ int main(int argc, char** argv)
                         arg_num, arg_value, "Static Symbolic Execution", "[options] <input-bitcode...>"
                     );
     delete[] arg_value;
-    if (SYMABS())
-    {
-        testRelationalDomains();
+    if (runAEDomainTests())
         return 0;
-    }
-
-    if (AETEST())
-    {
-        AETest aeTest;
-        aeTest.testIntegerBoundaryArithmetic();
-        aeTest.testIntervalBoundaryArithmetic();
-        aeTest.testBinaryOpStmt();
-        aeTest.testLoadAndStore();
-        return 0;
-    }
 
     LLVMModuleSet::getLLVMModuleSet()->buildSVFModule(moduleNameVec);
     PAGBuilder builder;
