@@ -155,16 +155,15 @@ SVF::Interval AbstractInterpretation::getGepElementIndex(const GepStmt* gep)
         {
             const std::vector<u32_t>& flattened =
                 PAG::getPAG()->getTypeInfo(type)->getFlattenedElemIdxVec();
-            if (flattened.empty() ||
-                    upper >= static_cast<APOffset>(flattened.size()) || lower < 0)
-            {
-                lower = upper = 0;
-            }
-            else
-            {
-                lower = PAG::getPAG()->getFlattenedElemIdx(type, lower);
-                upper = PAG::getPAG()->getFlattenedElemIdx(type, upper);
-            }
+            // Keep only the in-array indices. For a four-element array,
+            // an unknown index gives [0, 3] and [1, 4] gives [1, 3].
+            // If the ranges do not overlap, treat the offset as unknown.
+            lower = std::max<s64_t>(lower, 0);
+            upper = std::min(upper, static_cast<s64_t>(flattened.size()) - 1);
+            if (lower > upper)
+                return SVF::Interval::top();
+            lower = PAG::getPAG()->getFlattenedElemIdx(type, lower);
+            upper = PAG::getPAG()->getFlattenedElemIdx(type, upper);
         }
         else if (type)
         {
@@ -250,9 +249,11 @@ SVF::AddressSet AbstractInterpretation::getGepObjAddrs(
     };
     const auto limit = static_cast<s64_t>(Options::MaxFieldLimit());
     const auto singleton = offset.isSingleton();
+    // An unknown offset covers the modeled fields starting at the pointee.
+    const auto lowestOffset = offset.isTop() ? 0 : -limit;
     // PAG takes the magnitude of negative offsets. Retain exact backward
     // offsets and exclude the one value with no signed magnitude.
-    const auto minimum = singleton ? CheckedInt64::Min + 1 : -limit;
+    const auto minimum = singleton ? CheckedInt64::Min + 1 : lowestOffset;
     const auto lower = std::clamp(endpoint(offset.lower()), minimum, limit);
     const auto upper = singleton ? lower : std::min(endpoint(offset.upper()), limit);
     for (APOffset index = lower; index <= upper; ++index)
