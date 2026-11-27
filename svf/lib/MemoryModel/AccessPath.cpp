@@ -32,11 +32,28 @@
 #include "MemoryModel/AccessPath.h"
 #include "Graphs/PAG.h"
 #include "SVFValues/SVFVariables.h"
+#include "Util/CheckedInt64.h"
 #include "Util/Options.h"
 #include "Util/SVFUtil.h"
 
 using namespace SVF;
 using namespace SVFUtil;
+
+namespace
+{
+
+APOffset addScaledOffset(APOffset base, APOffset index, u32_t stride = 1)
+{
+    // Layout coordinates are machine indices. Clamp an unrepresentable
+    // offset in its direction rather than overflowing a signed coordinate.
+    std::int64_t increment, offset;
+    if (CheckedInt64::mul(index, stride, increment) &&
+            CheckedInt64::add(base, increment, offset))
+        return offset;
+    return index < 0 ? CheckedInt64::Min : CheckedInt64::Max;
+}
+
+} // namespace
 
 /*!
  * Add offset value to vector offsetVarAndGepTypePairs
@@ -47,15 +64,42 @@ bool AccessPath::addOffsetVarAndGepTypePair(const ValVar* var, const SVFType* ge
     return true;
 }
 
-/// Return true if all offset values are constants
+std::optional<APOffset> AccessPath::constantIndex(const ValVar* variable) const
+{
+    const auto* constant = SVFUtil::dyn_cast<ConstIntValVar>(variable);
+    if (!constant)
+        return std::nullopt;
+
+    const auto& literal = constant->getIntegerLiteral();
+    if (literal.bitWidth <= 64 || !indexBitWidth || indexBitWidth >= literal.bitWidth)
+        return literal.fitsSigned64 ? std::optional<APOffset>(constant->getSExtValue())
+               : std::nullopt;
+    if (indexBitWidth > 64)
+        return std::nullopt;
+
+    auto bits = literal.wideWords.empty() ? std::uint64_t(constant->getZExtValue())
+                : literal.wideWords.front();
+    if (indexBitWidth < 64)
+    {
+        const auto modulus = std::uint64_t{1} << indexBitWidth;
+        bits &= modulus - 1;
+        if (bits >= modulus / 2)
+            return -static_cast<APOffset>(modulus - bits);
+        return static_cast<APOffset>(bits);
+    }
+    constexpr auto signBit = std::uint64_t{1} << 63;
+    return bits < signBit ? static_cast<APOffset>(bits)
+           : -1 - static_cast<APOffset>(~bits);
+}
+
+/// Return true if all offsets can be interpreted as machine indices.
 bool AccessPath::isConstantOffset() const
 {
-    for(auto it : idxOperandPairs)
+    return std::all_of(idxOperandPairs.begin(), idxOperandPairs.end(),
+                       [&](const IdxOperandPair& pair)
     {
-        if(SVFUtil::isa<ConstIntValVar>(it.first) == false)
-            return false;
-    }
-    return true;
+        return constantIndex(pair.first).has_value();
+    });
 }
 
 /// Return element number of a type
@@ -158,25 +202,25 @@ APOffset AccessPath::computeConstantByteOffset() const
             type2 = gepSrcPointeeType();
         }
 
-        const ConstIntValVar* op = SVFUtil::dyn_cast<ConstIntValVar>(var);
+        const auto offset = *constantIndex(var);
         if (const SVFStructType* structType = SVFUtil::dyn_cast<SVFStructType>(type))
         {
             /// for (1) structType: %struct.DEST
             ///   structField = 0, flattenIdx = 0, type2: int
             ///   structField = 1, flattenIdx = 1, type2: char[10]
             ///   structField = 2, flattenIdx = 11, type2: int[5]
-            for (u32_t structField = 0; structField < (u32_t)op->getSExtValue(); ++structField)
+            for (u32_t structField = 0; structField < static_cast<u32_t>(offset); ++structField)
             {
                 u32_t flattenIdx = structType->getTypeInfo()->getFlattenedFieldIdxVec()[structField];
                 type2 = structType->getTypeInfo()->getOriginalElemType(flattenIdx);
-                totalConstOffset += type2->getByteSize();
+                totalConstOffset = addScaledOffset(totalConstOffset, type2->getByteSize());
             }
         }
         else
         {
             /// for (2) i = 0, op: 0, type: [10 x i8]*(Ptr), type2: [10 x i8](Arr)
             ///         i = 1, op: 8, type: [10 x i8](Arr), type2: i8
-            totalConstOffset += op->getSExtValue() * type2->getByteSize();
+            totalConstOffset = addScaledOffset(totalConstOffset, offset, type2->getByteSize());
         }
     }
     totalConstOffset = Options::MaxFieldLimit() > totalConstOffset? totalConstOffset: Options::MaxFieldLimit();
@@ -227,16 +271,16 @@ APOffset AccessPath::computeConstantOffset() const
         const ValVar* var = idxOperandPairs[i].first;
         const SVFType* type = idxOperandPairs[i].second;
         assert(SVFUtil::isa<ConstIntValVar>(var) && "not a constant offset?");
-        s64_t constOffset = SVFUtil::dyn_cast<ConstIntValVar>(var)->getSExtValue();
+        s64_t constOffset = *constantIndex(var);
 
         if(type==nullptr)
         {
-            totalConstOffset += constOffset;
+            totalConstOffset = addScaledOffset(totalConstOffset, constOffset);
             continue;
         }
 
         if(SVFUtil::isa<SVFPointerType>(type))
-            totalConstOffset += constOffset * getElementNum(gepPointeeType);
+            totalConstOffset = addScaledOffset(totalConstOffset, constOffset, getElementNum(gepPointeeType));
         else
         {
             APOffset offset = constOffset;
@@ -258,7 +302,7 @@ APOffset AccessPath::computeConstantOffset() const
                 u32_t flattenOffset =
                     PAG::getPAG()->getFlattenedElemIdx(type,
                                                        offset);
-                totalConstOffset += flattenOffset;
+                totalConstOffset = addScaledOffset(totalConstOffset, flattenOffset);
             }
         }
     }

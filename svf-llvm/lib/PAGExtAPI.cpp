@@ -301,7 +301,7 @@ const Type* PAGBuilder::getBaseTypeAndFlattenedFields(const Value* V, std::vecto
             SymbolTableBuilder builder(pag);
             builder.collectSym(offset);
             NodeID id = llvmModuleSet()->getValueNode(offset);
-            pag->addConstantIntValNode(id, LLVMUtil::getIntegerValue(offset), nullptr, llvmModuleSet()->getSVFType(offset->getType()));
+            pag->addConstantIntValNode(id, LLVMUtil::getIntegerValue(offset), nullptr, llvmModuleSet()->getSVFType(offset->getType()), LLVMUtil::getIntegerLiteral(offset));
             llvmModuleSet()->addToSVFVar2LLVMValueMap(offset,
                     pag->getGNode(id));
         }

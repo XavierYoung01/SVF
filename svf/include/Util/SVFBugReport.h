@@ -32,7 +32,7 @@
 
 #include "Util/cJSON.h"
 #include "Util/GeneralType.h"
-#include "AE/Core/NumericValue.h"
+#include "AE/Core/NumericalDomain.h"
 
 #define BRANCHFLAGMASK 0x00000010
 #define EVENTTYPEMASK 0x0000000f
@@ -120,15 +120,14 @@ public:
 class BufferOverflowBug: public GenericBug
 {
 protected:
-    BoundedInt allocLowerBound, allocUpperBound, accessLowerBound, accessUpperBound;
+    Interval allocationSize;
+    Interval accessOffset;
 
 public:
-    BufferOverflowBug(GenericBug::BugType bugType, const EventStack &eventStack,
-                      BoundedInt allocLowerBound, BoundedInt allocUpperBound,
-                      BoundedInt accessLowerBound, BoundedInt accessUpperBound):
-        GenericBug(bugType, eventStack), allocLowerBound(allocLowerBound),
-        allocUpperBound(allocUpperBound), accessLowerBound(accessLowerBound),
-        accessUpperBound(accessUpperBound) { }
+    BufferOverflowBug(GenericBug::BugType bugType, const EventStack& eventStack,
+                      const Interval& allocationSize, const Interval& accessOffset)
+        : GenericBug(bugType, eventStack), allocationSize(allocationSize),
+          accessOffset(accessOffset) {}
 
     cJSON *getBugDescription() const;
     void printBugToTerminal() const;
@@ -143,11 +142,10 @@ public:
 class FullBufferOverflowBug: public BufferOverflowBug
 {
 public:
-    FullBufferOverflowBug(const EventStack &eventStack,
-                          BoundedInt allocLowerBound, BoundedInt allocUpperBound,
-                          BoundedInt accessLowerBound, BoundedInt accessUpperBound):
-        BufferOverflowBug(GenericBug::FULLBUFOVERFLOW, eventStack, allocLowerBound,
-                          allocUpperBound, accessLowerBound, accessUpperBound) { }
+    FullBufferOverflowBug(const EventStack& eventStack,
+                          const Interval& allocationSize, const Interval& accessOffset)
+        : BufferOverflowBug(GenericBug::FULLBUFOVERFLOW, eventStack,
+                            allocationSize, accessOffset) {}
 
     /// ClassOf
     static inline bool classof(const GenericBug *bug)
@@ -159,11 +157,10 @@ public:
 class PartialBufferOverflowBug: public BufferOverflowBug
 {
 public:
-    PartialBufferOverflowBug( const EventStack &eventStack,
-                              BoundedInt allocLowerBound, BoundedInt allocUpperBound,
-                              BoundedInt accessLowerBound, BoundedInt accessUpperBound):
-        BufferOverflowBug(GenericBug::PARTIALBUFOVERFLOW, eventStack, allocLowerBound,
-                          allocUpperBound, accessLowerBound, accessUpperBound) { }
+    PartialBufferOverflowBug(const EventStack& eventStack,
+                             const Interval& allocationSize, const Interval& accessOffset)
+        : BufferOverflowBug(GenericBug::PARTIALBUFOVERFLOW, eventStack,
+                            allocationSize, accessOffset) {}
 
     /// ClassOf
     static inline bool classof(const GenericBug *bug)
@@ -358,13 +355,10 @@ public:
         newBug->printBugToTerminal();
     }
 
-    /*
-     * function: pass bug type (i.e., GenericBug::FULLBUFOVERFLOW) and eventStack as parameter,
-     *      it will add the bug into bugQueue.
-     * usage: addAbsExecBug(GenericBug::FULLBUFOVERFLOW, eventStack, 0, 10, 11, 11)
-     */
-    void addAbsExecBug(GenericBug::BugType bugType, const GenericBug::EventStack &eventStack,
-                       BoundedInt allocLowerBound, BoundedInt allocUpperBound, BoundedInt accessLowerBound, BoundedInt accessUpperBound)
+    /// Record and print a bug from abstract execution.
+    void addAbsExecBug(GenericBug::BugType bugType, const GenericBug::EventStack& eventStack,
+                       const Interval& allocationSize = Interval::top(),
+                       const Interval& accessOffset = Interval::top())
     {
         /// add bugs
         GenericBug *newBug = nullptr;
@@ -372,13 +366,13 @@ public:
         {
         case GenericBug::FULLBUFOVERFLOW:
         {
-            newBug = new FullBufferOverflowBug(eventStack, allocLowerBound, allocUpperBound, accessLowerBound, accessUpperBound);
+            newBug = new FullBufferOverflowBug(eventStack, allocationSize, accessOffset);
             bugSet.insert(newBug);
             break;
         }
         case GenericBug::PARTIALBUFOVERFLOW:
         {
-            newBug = new PartialBufferOverflowBug(eventStack, allocLowerBound, allocUpperBound, accessLowerBound, accessUpperBound);
+            newBug = new PartialBufferOverflowBug(eventStack, allocationSize, accessOffset);
             bugSet.insert(newBug);
             break;
         }
@@ -396,8 +390,8 @@ public:
         }
         default:
         {
-            assert(false && "Abstract Execution does NOT have this bug type!");
-            break;
+            assert(false && "unexpected abstract execution bug type");
+            std::abort();
         }
         }
 

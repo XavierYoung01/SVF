@@ -21,288 +21,345 @@
 //===---------------------------------------------------------------------===//
 
 #include "AE/Svfexe/SparseAbstractInterpretation.h"
-#include "AE/Svfexe/AEWTO.h"
-#include "Graphs/SparseObjGraph.h"
-#include "Graphs/PAG.h"
+
 #include "Graphs/SVFG.h"
+#include "Graphs/SparseObjGraph.h"
 #include "MSSA/SVFGBuilder.h"
-#include "WPA/Andersen.h"
+#include "Graphs/PAG.h"
 #include "Util/Options.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
+#include <iterator>
 #include <optional>
+#include <set>
 
-using namespace SVF;
+namespace SVF
+{
 
-// FullSparse Obj inputs follow prebuilt routes. Shared SSA def-site access
-// and WTO gather/scatter retain their existing implementations.
+SemiSparseAbstractInterpretation::SemiSparseAbstractInterpretation()
+{
+    preAnalysis->initCycleValVars();
+}
 
-// =====================================================================
-//  Full-sparse — class lifecycle + SVFG construction.
-// =====================================================================
+const ICFGNode* SemiSparseAbstractInterpretation::getICFGNode(const ValVar* var) const
+{
+    if (!var->getICFGNode())
+        return icfg->getGlobalICFGNode();
+    if (SVFUtil::isa<CallICFGNode>(var->getICFGNode()) && SVFUtil::isa<RetValPN>(var))
+        return SVFUtil::cast<CallICFGNode>(var->getICFGNode())->getRetICFGNode();
+    return var->getICFGNode();
+}
+
+SVF::Interval SemiSparseAbstractInterpretation::getInterval(const ValVar* var, const ICFGNode*)
+{
+    return Base::getInterval(var, getICFGNode(var));
+}
+
+SVF::Interval SemiSparseAbstractInterpretation::getDefinedInterval(const ValVar* var, const ICFGNode*)
+{
+    return Base::getDefinedInterval(var, getICFGNode(var));
+}
+
+SVF::AddressSet SemiSparseAbstractInterpretation::getAddressSet(const ValVar* var, const ICFGNode*)
+{
+    return Base::getAddressSet(var, getICFGNode(var));
+}
+
+bool SemiSparseAbstractInterpretation::hasAbsValue(const ValVar* var, const ICFGNode*) const
+{
+    return Base::hasAbsValue(var, getICFGNode(var));
+}
+
+bool SemiSparseAbstractInterpretation::numericalValueMayBeUninitialized(const ValVar* var, const ICFGNode*) const
+{
+    return Base::numericalValueMayBeUninitialized(var, getICFGNode(var));
+}
+
+void SemiSparseAbstractInterpretation::updateValue(const ValVar* var,
+        const SVF::Interval& interval, const SVF::AddressSet& addresses, const ICFGNode* node)
+{
+    Base::updateValue(var, interval, addresses, var->getICFGNode() ? var->getICFGNode() : node);
+}
+
+void SemiSparseAbstractInterpretation::addUninitializedNumericalAlternative(const ValVar* var, const ICFGNode* node)
+{
+    Base::addUninitializedNumericalAlternative(var, var->getICFGNode() ? var->getICFGNode() : node);
+}
+
+std::set<SVF::Variable> SemiSparseAbstractInterpretation::scalarVariables(
+    const State& state) const
+{
+    std::set<SVF::Variable> scalars;
+    const auto addScalars = [&](const std::vector<SVF::Variable>& variables)
+    {
+        for (SVF::Variable variable : variables)
+            if (adapter_.isScalar(variable))
+                scalars.insert(variable);
+    };
+    addScalars(state.initializedVariables());
+    addScalars(state.numerical().supportVariables());
+    addScalars(state.addresses().nonDefaultVariables());
+    return scalars;
+}
+
+void SemiSparseAbstractInterpretation::forgetScalarValues(State& state) const
+{
+    for (SVF::Variable variable : scalarVariables(state))
+        state.resetValue(variable);
+}
+
+SemiSparseAbstractInterpretation::State
+SemiSparseAbstractInterpretation::propagatedState(const State& source) const
+{
+    State result = source;
+    forgetScalarValues(result);
+    return result;
+}
+
+void SemiSparseAbstractInterpretation::updateFlowState(const ICFGNode* node, State incoming)
+{
+    // SSA values remain at their definition sites when memory is replaced.
+    const auto old = abstractTrace_.find(node);
+    if (old != abstractTrace_.end())
+        for (SVF::Variable var : scalarVariables(old->second))
+            incoming.assignValueFrom(var, old->second, var);
+    abstractTrace_.insert_or_assign(node, std::move(incoming));
+}
+
+void SemiSparseAbstractInterpretation::copyAbstractState(const ICFGNode* source, const ICFGNode* destination)
+{
+    State incoming = state(source);
+    forgetScalarValues(incoming);
+    updateFlowState(destination, std::move(incoming));
+}
+
+bool SemiSparseAbstractInterpretation::mergeStatesFromPredecessors(const ICFGNode* node)
+{
+    State merged = bottomState();
+    bool hasFeasiblePredecessor = false;
+    for (const ICFGEdge* edge : node->getInEdges())
+    {
+        const ICFGNode* predecessor = edge->getSrcNode();
+        if (!hasAbsState(predecessor)) continue;
+        const auto* branch = SVFUtil::dyn_cast<IntraCFGEdge>(edge);
+        if (!branch && !SVFUtil::isa<CallCFGEdge>(edge) && !SVFUtil::isa<RetCFGEdge>(edge)) continue;
+        if (SVFUtil::isa<RetCFGEdge>(edge) && Options::HandleRecur() != TOP &&
+                !hasAbsState(SVFUtil::cast<RetICFGNode>(node)->getCallICFGNode())) continue;
+        State incoming = state(predecessor);
+        if (branch && branch->getCondition())
+        {
+            if (!isBranchEdgeFeasibleAt(branch, predecessor)) continue;
+            collectBranchRefinement(branch, incoming);
+        }
+        merged.joinWith(propagatedState(incoming));
+        hasFeasiblePredecessor = true;
+    }
+    if (hasFeasiblePredecessor)
+        updateFlowState(node, std::move(merged));
+    return hasFeasiblePredecessor;
+}
+
+void SemiSparseAbstractInterpretation::collectComponentScalarInputs(
+    const ICFGNode* node, State& input)
+{
+    const auto copyValue = [&](const SVFVar* operand)
+    {
+        const auto* var = SVFUtil::dyn_cast<ValVar>(operand);
+        if (var && adapter_.contains(*var) && getICFGNode(var) != node &&
+                hasAbsValue(var, node))
+        {
+            const Variable key = adapter_.variable(*var);
+            input.assignValueFrom(key, state(getICFGNode(var)), key);
+        }
+    };
+    for (const SVFStmt* statement : node->getSVFStmts())
+    {
+        if (const auto* branch = SVFUtil::dyn_cast<BranchStmt>(statement))
+            copyValue(branch->getCondition());
+        else if (const auto* multi = SVFUtil::dyn_cast<MultiOpndStmt>(statement))
+            for (u32_t index = 0; index < multi->getOpVarNum(); ++index)
+                copyValue(multi->getOpVar(index));
+        else
+            copyValue(statement->getSrcNode());
+
+        if (const auto* gep = SVFUtil::dyn_cast<GepStmt>(statement))
+            for (const auto& offset : gep->getOffsetVarAndGepTypePairVec())
+                copyValue(offset.first);
+    }
+}
+
+std::unique_ptr<SVF::AbstractDomain>
+SemiSparseAbstractInterpretation::cloneCycleHeadState(const ICFGCycleWTO* cycle)
+{
+    State snapshot = state(cycle->head()->getICFGNode());
+    forgetScalarValues(snapshot);
+    for (const ValVar* var : preAnalysis->getCycleValVars(cycle))
+    {
+        const ICFGNode* defSite = var->getICFGNode();
+        if (!defSite || !hasAbsValue(var, defSite) || !adapter_.contains(*var)) continue;
+        assignValue(snapshot, adapter_.variable(*var), getInterval(var, defSite), getAddressSet(var, defSite));
+    }
+    return std::make_unique<State>(std::move(snapshot));
+}
+
+void SemiSparseAbstractInterpretation::scatterCycleValues(const State& snapshot, const ICFGNode* node)
+{
+    for (SVF::Variable variable : snapshot.initializedVariables())
+        if (const ValVar* var = adapter_.value(variable))
+            updateValue(var, snapshot.interval(variable), snapshot.addressSet(variable), node);
+}
+
+bool SemiSparseAbstractInterpretation::widenCycleState(const SVF::AbstractDomain& previous,
+        const SVF::AbstractDomain& current, const ICFGCycleWTO* cycle)
+{
+    const bool fixpoint = Base::widenCycleState(previous, current, cycle);
+    const ICFGNode* head = cycle->head()->getICFGNode();
+    const State snapshot = state(head);
+    scatterCycleValues(snapshot, head);
+    return fixpoint;
+}
+
+bool SemiSparseAbstractInterpretation::narrowCycleState(const SVF::AbstractDomain& previous,
+        const SVF::AbstractDomain& current, const ICFGCycleWTO* cycle)
+{
+    const bool fixpoint = Base::narrowCycleState(previous, current, cycle);
+    if (!fixpoint)
+    {
+        const ICFGNode* head = cycle->head()->getICFGNode();
+        const State snapshot = state(head);
+        scatterCycleValues(snapshot, head);
+    }
+    return fixpoint;
+}
+
+FullSparseAbstractInterpretation::FullSparseAbstractInterpretation()
+{
+    SVFGBuilder builder(true);
+    builder.buildFullSVFG(preAnalysis->getPointerAnalysis());
+    objRoutes_ = std::make_unique<SparseObjGraph>(
+                     *builder.getSVFG(), *icfg, *preAnalysis->getPointerAnalysis(),
+                     *svfir);
+}
 
 FullSparseAbstractInterpretation::~FullSparseAbstractInterpretation() = default;
 
-void FullSparseAbstractInterpretation::buildSVFG()
+FullSparseAbstractInterpretation::State FullSparseAbstractInterpretation::
+propagatedState(const State& source) const
 {
-    // AE reads Obj values only through the route graph, which copies what it
-    // needs from the SVFG. The builder, and with it the SVFG and its MemSSA,
-    // is destroyed on return.
-    SVFGBuilder svfgBuilder(true);
-    svfgBuilder.buildFullSVFG(preAnalysis->getPointerAnalysis());
-    objRoutes = std::make_unique<SparseObjGraph>(
-                    *svfgBuilder.getSVFG(), *pag->getICFG(),
-                    *preAnalysis->getPointerAnalysis(), *pag);
+    if (source.isBottom())
+        return bottomState();
+    State result = topState();
+    result.lifetimes() = source.lifetimes();
+    return result;
 }
 
-void FullSparseAbstractInterpretation::mergeFreedAddrs(AbstractState& dst,
-        const AbstractState& src)
+void FullSparseAbstractInterpretation::storeValue(const ValVar* pointer,
+        const Interval& interval,
+        const AddressSet& addresses,
+        const ICFGNode* node)
 {
-    for (NodeID addr : src.getFreedAddrs())
-        dst.addToFreedAddrs(addr);
-}
-
-void FullSparseAbstractInterpretation::joinStates(AbstractState& dst,
-        const AbstractState& src, const NodeBS& objs)
-{
-    for (NodeID obj : objs)
+    const AddressSet targets = Base::getAddressSet(pointer, node);
+    Base::storeValue(pointer, interval, addresses, node);
+    auto record = [&](Location location)
     {
-        const u32_t addr = AbstractState::getVirtualMemAddress(obj);
-        const auto value = src.getLocToVal().find(src.getIDFromAddr(addr));
-        if (value != src.getLocToVal().end())
+        const ObjVar* object = objectAt(location);
+        if (object && memoryVariable(*object, state(node)) ==
+                adapter_.contentVariable(*object))
+            memoryDefinitionSupport_[node].insert(
+                adapter_.contentVariable(*object));
+    };
+    if (targets.hasUnknownObject())
+        for (const auto& [location, variable] : adapter_.memoryLayout().cells())
         {
-            if (dst.getLocToVal().count(dst.getIDFromAddr(addr)))
-                dst.load(addr).join_with(value->second);
-            else
-                dst.store(addr, value->second);
+            (void)variable;
+            record(location);
         }
-    }
+    else
+        for (Location location : targets)
+            record(location);
+}
+
+std::optional<FullSparseAbstractInterpretation::ComponentInput>
+FullSparseAbstractInterpretation::probeComponentInput(const ICFGNode* node)
+{
+    const auto oldSupport = memoryDefinitionSupport_.find(node);
+    std::optional<std::set<Variable>> support;
+    if (oldSupport != memoryDefinitionSupport_.end())
+        support = oldSupport->second;
+    auto input = Base::probeComponentInput(node);
+    const auto current = memoryDefinitionSupport_.find(node);
+    if (input && current != memoryDefinitionSupport_.end())
+        input->memorySupport = std::move(current->second);
+    if (support)
+        memoryDefinitionSupport_.insert_or_assign(node, std::move(*support));
+    else
+        memoryDefinitionSupport_.erase(node);
+    return input;
 }
 
 bool FullSparseAbstractInterpretation::mergeStatesFromPredecessors(
     const ICFGNode* node)
 {
-    const auto& graphEdges = objRoutes->getInputs(node);
-    AbstractState preIterationState;
-    bool hasPreIteration = false;
-    for (const SparseObjGraph::Edge* edge : graphEdges)
-    {
+    std::optional<State> previous;
+    std::set<Variable> previousSupport;
+    const auto& edges = objRoutes_->getInputs(node);
+    for (const auto* edge : edges)
         if (edge->getSrcNode()->getICFGNode() == node && hasAbsState(node))
         {
-            preIterationState = getAbsState(node);
-            hasPreIteration = true;
+            previous = state(node);
+            previousSupport = std::move(memoryDefinitionSupport_[node]);
             break;
         }
-    }
-
-    // The ICFG merge determines reachability and propagates freed addresses.
-    const bool reachable = SemiSparseAbstractInterpretation::mergeStatesFromPredecessors(node);
-    if (reachable)
-    {
-        AbstractState merged = getAbsState(node);
-        for (const SparseObjGraph::Edge* edge : graphEdges)
-        {
-            const SparseObjGraph::Node* sourceNode = edge->getSrcNode();
-            const ICFGNode* source = sourceNode->getICFGNode();
-            const AbstractState* sourceState = source == node
-                                               ? (hasPreIteration ? &preIterationState : nullptr)
-                                               : (hasAbsState(source)
-                                                  ? &getAbsState(source) : nullptr);
-            if (!sourceState)
-                continue;
-
-            const AbstractState* input = sourceState;
-            AbstractState refined;
-            if (sourceNode->branch)
-            {
-                refined = *sourceState;
-                if (!isBranchEdgeFeasible(sourceNode->branch, refined) ||
-                        !applyBranchRefinement(sourceNode->branch, refined))
-                    continue;
-                input = &refined;
-            }
-            for (NodeID base : edge->getBases())
-                joinStates(merged, *input, pag->getAllFieldsObjVars(
-                               pag->getBaseObject(base)));
-        }
-        updateAbsState(node, merged);
-    }
-    return reachable;
-}
-
-AbstractState SemiSparseAbstractInterpretation::getFullCycleHeadState(
-    const ICFGCycleWTO* cycle)
-{
-    // Start from the dense snapshot (ObjVars + any ValVars that happen to
-    // be cached at cycle_head's trace entry).
-    AbstractState snap = AbstractInterpretation::getFullCycleHeadState(cycle);
-
-    const Set<const ValVar*>& valVars = preAnalysis->getCycleValVars(cycle);
-    if (valVars.empty())
-        return snap;  // no cycle ValVars known: nothing to pull
-
-    // Drop stale ValVar entries and pull each cycle ValVar from its
-    // def-site.  ValVars without a genuine stored value are skipped to
-    // avoid getAbsValue's top-fallback contaminating body def-sites on
-    // the subsequent widen/narrow scatter.
-    snap.clearValVars();
-    for (const ValVar* v : valVars)
-    {
-        const ICFGNode* defSite = v->getICFGNode();
-        if (!defSite || !hasAbsValue(v, defSite))
-            continue;
-        snap[v->getId()] = getAbsValue(v, defSite);
-    }
-    return snap;
-}
-
-bool SemiSparseAbstractInterpretation::widenCycleState(
-    const AbstractState& prev, const AbstractState& cur, const ICFGCycleWTO* cycle)
-{
-    // Base widens, writes trace[cycle_head], and returns fixpoint bool.
-    bool fixpoint = AbstractInterpretation::widenCycleState(prev, cur, cycle);
-
-    // Scatter the widened ValVars back to their def-sites so body nodes
-    // observe the widened values on the next iteration.  Matches the
-    // pre-refactor semantics: scatter unconditionally, including at
-    // widening fixpoint (see the narrowing-starts-with-stale-body issue
-    // fixed by always writing widened state back).
-    const ICFGNode* cycle_head = cycle->head()->getICFGNode();
-    const AbstractState& next = abstractTrace[cycle_head];
-    for (const auto& [id, val] : next.getVarToVal())
-        updateAbsValue(pag->getSVFVar(id), val, cycle_head);
-    return fixpoint;
-}
-
-bool SemiSparseAbstractInterpretation::narrowCycleState(
-    const AbstractState& prev, const AbstractState& cur, const ICFGCycleWTO* cycle)
-{
-    // Delegate to base.  It returns true on the two non-scatter cases
-    // (narrowing disabled, or narrow fixpoint); we preserve the original
-    // "skip scatter at fixpoint" semantics by bailing early here.
-    bool fixpoint = AbstractInterpretation::narrowCycleState(prev, cur, cycle);
-    if (fixpoint)
-        return true;
-
-    // Non-fixpoint: base wrote the narrowed state to trace.  Scatter the
-    // narrowed ValVars back to def-sites.
-    const ICFGNode* cycle_head = cycle->head()->getICFGNode();
-    const AbstractState& next = abstractTrace[cycle_head];
-    for (const auto& [id, val] : next.getVarToVal())
-        updateAbsValue(pag->getSVFVar(id), val, cycle_head);
-    return false;
-}
-
-// =====================================================================
-//  Shared SemiSparse/FullSparse state-access overrides. Both use the
-//  established ValVar def-site reads and writes below.
-// =====================================================================
-
-void SemiSparseAbstractInterpretation::updateAbsState(
-    const ICFGNode* node, const AbstractState& state)
-{
-    // Only replace ObjVar state.  ValVars live at their def-sites and
-    // must not be overwritten when the predecessor's state is merged in.
-    abstractTrace[node].updateAddrStateOnly(state);
-}
-
-bool SemiSparseAbstractInterpretation::mergeStatesFromPredecessors(
-    const ICFGNode* node)
-{
-    // ObjVars come from the ICFG predecessors.
-    if (!AbstractInterpretation::mergeStatesFromPredecessors(node))
+    memoryDefinitionSupport_.erase(node);
+    if (!Base::mergeStatesFromPredecessors(node))
         return false;
-    // ValVars are not carried along the ICFG and are read at their def-sites;
-    // copy node's reads into its state so the state is its whole input.
-    mergeSparseValVarsFromPredecessors(node, abstractTrace[node]);
+    State& merged = ensureState(node);
+    NodeBS pulled;
+    for (const auto* edge : edges)
+    {
+        const auto* sourceNode = edge->getSrcNode();
+        const ICFGNode* source = sourceNode->getICFGNode();
+        const State* input =
+            source == node ? (previous ? &*previous : nullptr)
+            : (hasAbsState(source) ? &state(source) : nullptr);
+        if (!input)
+            continue;
+        std::optional<State> refined;
+        const State* values = input;
+        if (sourceNode->branch)
+        {
+            if (!isBranchEdgeFeasibleAt(sourceNode->branch, source))
+                continue;
+            refined = *input;
+            if (!collectBranchRefinement(sourceNode->branch, *refined))
+                continue;
+            values = &*refined;
+        }
+        const auto& support =
+            source == node ? previousSupport : memoryDefinitionSupport_[source];
+        for (NodeID base : edge->getBases())
+            for (NodeID id : svfir->getAllFieldsObjVars(svfir->getBaseObject(base)))
+            {
+                const auto* object =
+                    SVFUtil::dyn_cast<ObjVar>(svfir->getSVFVar(id));
+                if (!object)
+                    continue;
+                const Variable content = adapter_.contentVariable(*object);
+                if (!input->hasValue(content) && !support.count(content))
+                    continue;
+                const Variable from = memoryVariable(*object, *values);
+                const Variable to = memoryVariable(*object, merged);
+                if (pulled.test(id))
+                    merged.joinValueFrom(to, *values, from);
+                else
+                    merged.assignValueFrom(to, *values, from);
+                pulled.set(id);
+                memoryDefinitionSupport_[node].insert(content);
+            }
+    }
     return true;
 }
 
-void SemiSparseAbstractInterpretation::mergeSparseValVarsFromPredecessors(
-    const ICFGNode* node, AbstractState& state)
-{
-    for (const SVFStmt* stmt : node->getSVFStmts())
-    {
-        // The PAG predecessors of stmt.
-        std::vector<const SVFVar*> preds;
-        if (const BranchStmt* branch = SVFUtil::dyn_cast<BranchStmt>(stmt))
-            preds.push_back(branch->getCondition());
-        else if (const MultiOpndStmt* multi = SVFUtil::dyn_cast<MultiOpndStmt>(stmt))
-            for (u32_t i = 0; i < multi->getOpVarNum(); i++)
-                preds.push_back(multi->getOpVar(i));
-        else
-            preds.push_back(stmt->getSrcNode());
-        // A gep's variable offsets are read too, but are not PAG edges.
-        if (const GepStmt* gep = SVFUtil::dyn_cast<GepStmt>(stmt))
-            for (const auto& offset : gep->getOffsetVarAndGepTypePairVec())
-                preds.push_back(offset.first);
-        for (const SVFVar* pred : preds)
-            if (const ValVar* var = SVFUtil::dyn_cast<ValVar>(pred))
-                if (getICFGNode(var) != node && hasAbsValue(var, node))
-                    state[var->getId()] = getAbsValue(var, node);
-    }
-}
-
-void SemiSparseAbstractInterpretation::joinStates(AbstractState& dst,
-        const AbstractState& src)
-{
-    // ValVars live at def-sites in semi-sparse mode; they don't flow
-    // through state merges.  Iterate src's ObjVar (_addrToAbsVal) entries
-    // directly and join into dst, leaving dst's ValVar map untouched.
-    // _freedAddrs (used by the null-deref detector) also rides along
-    // ICFG edges — there is no SVFG-level encoding of free events.
-    for (const auto& [id, val] : src.getLocToVal())
-    {
-        u32_t addr = AbstractState::getVirtualMemAddress(id);
-        if (dst.getLocToVal().count(id))
-            dst.load(addr).join_with(val);
-        else
-            dst.store(addr, val);
-    }
-    for (NodeID a : src.getFreedAddrs())
-        dst.addToFreedAddrs(a);
-}
-
-const ICFGNode* SemiSparseAbstractInterpretation::getICFGNode(
-    const ValVar* var) const
-{
-    // const ValVars are all defined in global node
-    if (!var->getICFGNode())
-    {
-        return pag->getICFG()->getGlobalICFGNode();
-    }
-    // for return value of callsite, use the ret-site as def-site
-    else if (SVFUtil::isa<CallICFGNode>(var->getICFGNode()) &&
-             SVFUtil::isa<RetValPN>(var))
-    {
-        return SVFUtil::dyn_cast<CallICFGNode>(var->getICFGNode())
-               ->getRetICFGNode();
-    }
-    // for other ValVars, use their def-site as the node to query abstract
-    // value.
-    else
-    {
-        return var->getICFGNode();
-    }
-}
-
-void SemiSparseAbstractInterpretation::updateAbsValue(const ValVar* var,
-        const AbstractValue& val,
-        const ICFGNode* node)
-{
-    // Write to the var's def-site so getAbsValue stays consistent.
-    const ICFGNode* defNode = var->getICFGNode() ? var->getICFGNode() : node;
-    abstractTrace[defNode][var->getId()] = val;
-}
-
-const AbstractValue& SemiSparseAbstractInterpretation::getAbsValue(
-    const ValVar* var, const ICFGNode* node)
-{
-    // Read from the var's def-site (where updateAbsValue wrote it).
-    return AbstractInterpretation::getAbsValue(var, getICFGNode(var));
-}
-
-bool SemiSparseAbstractInterpretation::hasAbsValue(const ValVar* var,
-        const ICFGNode* node) const
-{
-    return AbstractInterpretation::hasAbsValue(var, getICFGNode(var));
-}
+} // namespace SVF

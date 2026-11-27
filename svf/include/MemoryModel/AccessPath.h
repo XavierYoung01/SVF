@@ -39,6 +39,8 @@
 #include "Util/GeneralType.h"
 #include "Util/Hash.h"
 
+#include <optional>
+
 namespace SVF
 {
 
@@ -73,7 +75,7 @@ public:
     AccessPath(const AccessPath& ap)
         : fldIdx(ap.fldIdx),
           idxOperandPairs(ap.getIdxOperandPairVec()),
-          gepPointeeType(ap.gepSrcPointeeType())
+          gepPointeeType(ap.gepSrcPointeeType()), indexBitWidth(ap.indexBitWidth)
     {
     }
 
@@ -93,9 +95,20 @@ public:
     inline bool operator==(const AccessPath& rhs) const
     {
         return this->fldIdx == rhs.fldIdx &&
-               this->idxOperandPairs == rhs.idxOperandPairs && this->gepPointeeType == rhs.gepPointeeType;
+               this->idxOperandPairs == rhs.idxOperandPairs &&
+               this->gepPointeeType == rhs.gepPointeeType &&
+               indexBitWidth == rhs.indexBitWidth;
     }
     //@}
+
+    unsigned getIndexBitWidth() const
+    {
+        return indexBitWidth;
+    }
+    void setIndexBitWidth(unsigned width)
+    {
+        indexBitWidth = width;
+    }
 
     /// Get methods
     //@{
@@ -151,6 +164,9 @@ public:
 
     bool addOffsetVarAndGepTypePair(const ValVar* var, const SVFType* gepIterType);
 
+    /// Interpret a constant index for this access path's pointer layout.
+    std::optional<APOffset> constantIndex(const ValVar* variable) const;
+
     /// Return TRUE if this is a constant location set.
     bool isConstantOffset() const;
 
@@ -185,6 +201,7 @@ private:
     const SVFType* gepPointeeType;   /// source element type in gep instruction,
     /// e.g., %f1 = getelementptr inbounds %struct.MyStruct, %struct.MyStruct* %arrayidx, i32 0, i32 0
     /// the source element type is %struct.MyStruct
+    unsigned indexBitWidth = 0;
 };
 
 } // End namespace SVF

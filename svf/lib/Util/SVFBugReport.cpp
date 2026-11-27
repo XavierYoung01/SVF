@@ -28,6 +28,7 @@
 #include <cassert>
 #include <sstream>
 #include <fstream>
+#include <limits>
 
 #include "Graphs/ICFGNode.h"
 #include "Util/cJSON.h"
@@ -64,35 +65,51 @@ const std::string GenericBug::getFuncName() const
     return sourceInstEvent.getFuncName();
 }
 
+namespace
+{
+const char* formatInfinity(const Bound& bound)
+{
+    return bound.isPlusInfinity() ? "+oo" : "-oo";
+}
+
+Rational integerByteCount(const Rational& value)
+{
+    // Report byte counts as integers using the existing round-toward-zero policy.
+    return value.isInteger() ? value : value.sign() < 0 ? value.ceil() : value.floor();
+}
+
+std::string formatByteBound(const Bound& bound)
+{
+    return bound.isFinite() ? integerByteCount(bound.value()).toString() : formatInfinity(bound);
+}
+
+cJSON* byteBoundToJson(const Bound& bound)
+{
+    if (!bound.isFinite())
+        return cJSON_CreateString(formatInfinity(bound));
+
+    const Rational value = integerByteCount(bound.value());
+    constexpr auto exactDoubleLimit = std::int64_t{1} << std::numeric_limits<double>::digits;
+    std::int64_t integer;
+    if (value.tryToInt64(integer) && integer >= -exactDoubleLimit && integer <= exactDoubleLimit)
+        return cJSON_CreateNumber(static_cast<double>(integer));
+    // cJSON stores numbers as doubles. Emit the exact decimal for larger integers.
+    return cJSON_CreateRaw(value.toString().c_str());
+}
+} // namespace
+
 cJSON *BufferOverflowBug::getBugDescription() const
 {
-    const auto endpoint = [](const BoundedInt& value)
-    {
-        if (value.is_infinity())
-            return cJSON_CreateString(value.is_plus_infinity() ? "+oo" : "-oo");
-        return cJSON_CreateNumber(value.getNumeral());
-    };
-    cJSON *bugDescription = cJSON_CreateObject();
-    cJSON *allocLB = endpoint(allocLowerBound);
-    cJSON *allocUB = endpoint(allocUpperBound);
-    cJSON *accessLB = endpoint(accessLowerBound);
-    cJSON *accessUB = endpoint(accessUpperBound);
-
-    cJSON_AddItemToObject(bugDescription, "AllocLowerBound", allocLB);
-    cJSON_AddItemToObject(bugDescription, "AllocUpperBound", allocUB);
-    cJSON_AddItemToObject(bugDescription, "AccessLowerBound", accessLB);
-    cJSON_AddItemToObject(bugDescription, "AccessUpperBound", accessUB);
-
+    cJSON* bugDescription = cJSON_CreateObject();
+    cJSON_AddItemToObject(bugDescription, "AllocLowerBound", byteBoundToJson(allocationSize.lower()));
+    cJSON_AddItemToObject(bugDescription, "AllocUpperBound", byteBoundToJson(allocationSize.upper()));
+    cJSON_AddItemToObject(bugDescription, "AccessLowerBound", byteBoundToJson(accessOffset.lower()));
+    cJSON_AddItemToObject(bugDescription, "AccessUpperBound", byteBoundToJson(accessOffset.upper()));
     return bugDescription;
 }
 
 void BufferOverflowBug::printBugToTerminal() const
 {
-    const auto endpoint = [](const BoundedInt& value) -> std::string
-    {
-        if (value.is_infinity()) return value.is_plus_infinity() ? "+oo" : "-oo";
-        return std::to_string(value.getNumeral());
-    };
     stringstream bugInfo;
     if(FullBufferOverflowBug::classof(this))
     {
@@ -105,8 +122,8 @@ void BufferOverflowBug::printBugToTerminal() const
         SVFUtil::errs() << SVFUtil::bugMsg1("\t Partial Overflow :") <<  " accessing at : ("
                         << GenericBug::getLoc() << ")\n";
     }
-    bugInfo << "\t\t  allocate size : [" << endpoint(allocLowerBound) << ", " << endpoint(allocUpperBound) << "], ";
-    bugInfo << "access size : [" << endpoint(accessLowerBound) << ", " << endpoint(accessUpperBound) << "]\n";
+    bugInfo << "\t\t  allocate size : [" << formatByteBound(allocationSize.lower()) << ", " << formatByteBound(allocationSize.upper()) << "], ";
+    bugInfo << "access size : [" << formatByteBound(accessOffset.lower()) << ", " << formatByteBound(accessOffset.upper()) << "]\n";
     SVFUtil::errs() << "\t\t Info : \n" << bugInfo.str();
     SVFUtil::errs() << "\t\t Events : \n";
 

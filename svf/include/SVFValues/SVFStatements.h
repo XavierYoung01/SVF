@@ -1127,6 +1127,8 @@ private:
     BinaryOPStmt(const BinaryOPStmt&);   ///< place holder
     void operator=(const BinaryOPStmt&); ///< place holder
     u32_t opcode;
+    bool noSignedWrap = false;
+    bool noUnsignedWrap = false;
 
 public:
     /// OpCode for BinaryOPStmt, enum value is same to llvm BinaryOperator (llvm/IR/Instruction.def)
@@ -1178,6 +1180,20 @@ public:
     u32_t getOpcode() const
     {
         return opcode;
+    }
+
+    void setWrapFlags(bool signedWrap, bool unsignedWrap)
+    {
+        noSignedWrap = signedWrap;
+        noUnsignedWrap = unsignedWrap;
+    }
+    bool hasNoSignedWrap() const
+    {
+        return noSignedWrap;
+    }
+    bool hasNoUnsignedWrap() const
+    {
+        return noUnsignedWrap;
     }
 
     virtual const std::string toString() const override;

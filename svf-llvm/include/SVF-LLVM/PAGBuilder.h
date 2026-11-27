@@ -538,10 +538,14 @@ protected:
             setCurrentBBAndValueForPAGEdge(edge);
     }
     /// Add Copy edge
-    inline void addBinaryOPEdge(NodeID op1, NodeID op2, NodeID dst, u32_t opcode)
+    inline void addBinaryOPEdge(NodeID op1, NodeID op2, NodeID dst, u32_t opcode,
+                                bool noSignedWrap = false, bool noUnsignedWrap = false)
     {
-        if(BinaryOPStmt *edge = pag->addBinaryOPStmt(op1, op2, dst, opcode))
+        if (BinaryOPStmt* edge = pag->addBinaryOPStmt(op1, op2, dst, opcode))
+        {
+            edge->setWrapFlags(noSignedWrap, noUnsignedWrap);
             setCurrentBBAndValueForPAGEdge(edge);
+        }
     }
     /// Add Unary edge
     inline void addUnaryOPEdge(NodeID src, NodeID dst, u32_t opcode)

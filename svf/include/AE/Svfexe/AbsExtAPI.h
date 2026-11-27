@@ -28,8 +28,8 @@
 
 #include <functional>
 
-#include "AE/Core/AbstractState.h"
-#include "AE/Core/IntervalValue.h"
+#include "AE/Core/AddressDomain.h"
+#include "AE/Core/NumericalDomain.h"
 #include "Graphs/PAG.h"
 #include "Util/GeneralType.h"
 
@@ -37,7 +37,6 @@ namespace SVF
 {
 
 class AbstractInterpretation;
-class AbstractState;
 class CallICFGNode;
 class ICFGNode;
 
@@ -52,13 +51,21 @@ public:
      * @enum ExtAPIType
      * @brief Enumeration of external API types.
      */
-    enum ExtAPIType { UNCLASSIFIED, MEMCPY, MEMSET, STRCPY, STRCAT };
+    enum ExtAPIType
+    {
+        UNCLASSIFIED,
+        MEMCPY,
+        MEMSET,
+        STRCPY,
+        STRCAT
+    };
 
     // Only AbstractInterpretation may construct the single owned AbsExtAPI
     // instance (reachable through its private getUtils()). Keeping the
     // constructor private prevents external callers from creating their own
     // AbsExtAPI and invoking handleExtAPI()/handleMemcpy()/... directly.
     friend class AbstractInterpretation;
+
 private:
     /**
      * @brief Constructor for AbsExtAPI.
@@ -84,65 +91,61 @@ public:
      * @brief Handles an external API call.
      * @param call Pointer to the call ICFG node.
      */
-    void handleExtAPI(const CallICFGNode *call);
+    void handleExtAPI(const CallICFGNode* call);
 
     // --- Shared primitives used by string/memory handlers ---
 
     /// Get the byte size of each element for a pointer/array variable.
     u32_t getElementSize(const ValVar* var);
 
-    /// Scalar integer width of the pointed-to base object; zero if unknown.
-    u32_t getStringElementSize(const ValVar* var, const ICFGNode* node);
-    /// Last byte offset written for `length` elements plus the terminator.
-    IntervalValue getStringLastByte(const CallICFGNode* call, const IntervalValue& length);
-    /// Elements strncat appends: min(n, strlen(src)).
-    IntervalValue getStrncatLength(const CallICFGNode* call);
-    /// Write `length` source elements and a NUL into dst at element `start`.
-    void handleStringCopy(const CallICFGNode* call, const IntervalValue& length,
-                          const IntervalValue& start);
-
     /// Check if an interval length is usable (not bottom, not unbounded).
-    static bool isValidLength(const IntervalValue& len);
+    static bool isValidLength(const SVF::Interval& len);
 
-    /// Return the lower bound of len, capped by the field limit.
-    static u32_t getBoundedMinimumByteCount(const IntervalValue& len);
+    /// Calculate the length of a null-terminated string in abstract state.
+    SVF::Interval getStrlen(const ValVar* strValue,
+                            const ICFGNode* node);
 
-    /// String length in elements, excluding NUL; an unproved end is unbounded.
-    IntervalValue getStrlen(const ValVar *strValue, const ICFGNode* node);
+    Interval getStringLastByte(const CallICFGNode* call, const Interval& length);
 
     // --- String/memory operation handlers ---
 
-    void handleStrcpy(const CallICFGNode *call);
-    void handleStrcat(const CallICFGNode *call);
-    void handleStrncat(const CallICFGNode *call);
-    void handleMemcpy(const ValVar *dst, const ValVar *src, const IntervalValue& len, u32_t start_idx, const ICFGNode* node);
-    void handleMemset(const ValVar* dst, const IntervalValue& elem, const IntervalValue& len, const ICFGNode* node);
+    void handleStrcpy(const CallICFGNode* call);
+    void handleStrcat(const CallICFGNode* call);
+    void handleStrncat(const CallICFGNode* call);
+    void handleMemcpy(const ValVar* dst, const ValVar* src,
+                      const SVF::Interval& len, u32_t start_idx,
+                      const ICFGNode* node);
+    void handleMemset(const ValVar* dst,
+                      const SVF::Interval& element,
+                      const SVF::Interval& len,
+                      const ICFGNode* node);
 
     /**
      * @brief Gets the range limit from a type.
      * @param type Pointer to the SVF type.
      * @return The interval value representing the range limit.
      */
-    IntervalValue getRangeLimitFromType(const SVFType* type);
-
-    /**
-     * @brief Retrieves the abstract state from the trace for a given ICFG node.
-     * @param node Pointer to the ICFG node.
-     * @return Reference to the abstract state.
-     * @throws Assertion if no trace exists for the node.
-     */
-    AbstractState& getAbsState(const ICFGNode* node);
+    SVF::Interval getRangeLimitFromType(const SVFType* type);
 
     void collectCheckPoint();
     void checkPointAllSet();
 
     Set<const CallICFGNode*> checkpoints; // for CI check
 
+private:
+    u32_t getStringElementSize(const ValVar* var, const ICFGNode* node);
+    Location getStringField(const ObjVar& object, u32_t index);
+    Interval getStrncatLength(const CallICFGNode* call);
+    void handleStringCopy(const CallICFGNode* call, const Interval& length,
+                          const Interval& start);
+
 protected:
-    AbstractInterpretation* ae; ///< Owning AbstractInterpretation; provides state access.
-    PAG* pag; ///< Pointer to the SVF intermediate representation.
-    ICFG* icfg; ///< Pointer to the interprocedural control flow graph.
-    Map<std::string, std::function<void(const CallICFGNode*)>> func_map; ///< Map of function names to handlers.
+    AbstractInterpretation*
+    ae;       ///< Owning AbstractInterpretation; provides state access.
+    PAG* svfir; ///< Pointer to the SVF intermediate representation.
+    ICFG* icfg;   ///< Pointer to the interprocedural control flow graph.
+    Map<std::string, std::function<void(const CallICFGNode*)>>
+    func_map; ///< Map of function names to handlers.
 };
 
 } // namespace SVF
