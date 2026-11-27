@@ -397,9 +397,21 @@ void BoxDomain::forget(Variable variable)
 
 void BoxDomain::project(const std::vector<Variable>& retained)
 {
-    const std::set<Variable> keep(retained.begin(), retained.end());
-    for (Variable variable : constrainedVariables())
-        if (keep.count(variable) == 0)
+    const auto variables = constrainedVariables();
+    if (variables.empty())
+        return;
+
+    // Reuse an ordered scope, which replay can pass to many projections.
+    std::vector<Variable> sorted;
+    const std::vector<Variable>* keep = &retained;
+    if (!std::is_sorted(retained.begin(), retained.end()))
+    {
+        sorted = retained;
+        std::sort(sorted.begin(), sorted.end());
+        keep = &sorted;
+    }
+    for (Variable variable : variables)
+        if (!std::binary_search(keep->begin(), keep->end(), variable))
             forget(variable);
 }
 
